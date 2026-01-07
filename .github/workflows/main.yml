@@ -1,4 +1,4 @@
-name: Velopack Release (No Approval)
+name: Velopack Release
 
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
 
     steps:
     # ------------------------------------------------------------
-    # 1. Checkout (full history for guards)
+    # 1. Checkout (full history required for guards)
     # ------------------------------------------------------------
     - name: Checkout
       uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
         fetch-depth: 0
 
     # ------------------------------------------------------------
-    # 2. Extract version / channel from tag
+    # 2. Extract version & channel from tag
     # ------------------------------------------------------------
     - name: Extract version from tag
       id: version
@@ -39,7 +39,7 @@ jobs:
         echo "isBeta=$isBeta" >> $env:GITHUB_OUTPUT
 
     # ------------------------------------------------------------
-    # 3. Tag must point to HEAD
+    # 3. Tag must point to HEAD (no tag on old commit)
     # ------------------------------------------------------------
     - name: Verify tag points to HEAD
       shell: pwsh
@@ -72,7 +72,7 @@ jobs:
           }
 
     # ------------------------------------------------------------
-    # 5. Ensure code actually changed since previous tag
+    # 5. Ensure code changed since previous tag
     # ------------------------------------------------------------
     - name: Check diff from previous tag
       shell: pwsh
@@ -89,7 +89,7 @@ jobs:
         }
 
     # ------------------------------------------------------------
-    # 6. Stable requires beta history (optional but recommended)
+    # 6. Stable requires beta history (권장 가드)
     # ------------------------------------------------------------
     - name: Ensure beta existed before stable
       if: steps.version.outputs.isBeta == 'False'
@@ -113,30 +113,33 @@ jobs:
         dotnet-version: 8.0.x
 
     # ------------------------------------------------------------
-    # 8. Build / Publish (version injected)
+    # 8. Build / Publish
     # ------------------------------------------------------------
-    - name: Publish WPF
+    - name: Publish (solution based)
       run: >
-        dotnet publish src/MyKioskApp/MyKioskApp.csproj
+        dotnet publish VeloUpdateSystem.sln
         -c Release
         -r win-x64
         --self-contained false
         -o publish
         /p:Version=${{ steps.version.outputs.version }}
 
+      # ❗ 만약 csproj 단일 프로젝트라면 위 대신 아래 사용
+      # dotnet publish MyKioskApp.csproj ...
+
     # ------------------------------------------------------------
-    # 9. Install Velopack
+    # 9. Install Velopack CLI
     # ------------------------------------------------------------
     - name: Install Velopack
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 10. Velopack pack (beta / stable auto)
+    # 10. Velopack pack (beta / stable 자동 분기)
     # ------------------------------------------------------------
     - name: Velopack pack
       run: >
         vpk pack
-        --packId MyKioskApp
+        --packId VeloUpdateSystem
         --packVersion ${{ steps.version.outputs.version }}
         --packDir publish
         --outputDir artifacts
@@ -153,7 +156,7 @@ jobs:
         files: artifacts/**
 
     # ------------------------------------------------------------
-    # 12. Final summary (sanity check)
+    # 12. Final summary (human sanity check)
     # ------------------------------------------------------------
     - name: Deployment summary
       run: |
