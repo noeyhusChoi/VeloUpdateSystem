@@ -76,13 +76,14 @@ jobs:
     # 6. Velopack pack
     # ------------------------------------------------------------
     - name: Velopack pack
-      run: |
+    run: |
         vpk pack \
-          --packId VeloUpdateSystem \
-          --packVersion ${{ steps.version.outputs.version }} \
-          --packDir publish \
-          --outputDir artifacts \
-          --channel ${{ steps.version.outputs.channel }}
+        --packId VeloUpdateSystem \
+        --packVersion ${{ steps.version.outputs.version }} \
+        --packDir publish \
+        --outputDir artifacts \
+        --channel ${{ steps.version.outputs.channel }} \
+        --mainExe VeloUpdateSystem.exe
 
     # ------------------------------------------------------------
     # 7. Setup SSH (CI 안정 모드)
