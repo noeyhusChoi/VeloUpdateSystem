@@ -1,0 +1,6 @@
+# Visual Studio / .NET
+.vs/
+obj/
+bin/
+# Rider/IntelliJ / JetBrains
+.idea/
