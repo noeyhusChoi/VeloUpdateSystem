@@ -50,7 +50,7 @@ jobs:
         dotnet-version: 8.0.x
 
     # ------------------------------------------------------------
-    # 4. Publish WPF (csproj 기준)
+    # 4. Publish WPF
     # ------------------------------------------------------------
     - name: Publish WPF
       shell: pwsh
@@ -70,7 +70,7 @@ jobs:
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 6. Velopack pack (beta / stable 자동)
+    # 6. Velopack pack
     # ------------------------------------------------------------
     - name: Velopack pack
       shell: pwsh
@@ -85,7 +85,7 @@ jobs:
           --channel $channel
 
     # ------------------------------------------------------------
-    # 7. Setup SSH (Windows runner 대응)
+    # 7. Setup SSH (Windows runner + KEX 호환)
     # ------------------------------------------------------------
     - name: Setup SSH
       shell: pwsh
@@ -99,21 +99,22 @@ jobs:
           -Value "${{ secrets.AZURE_SSH_KEY }}" `
           -NoNewline
 
-        # known_hosts (⭐ host 반드시 필요)
-        ssh-keyscan -H ${{ vars.AZURE_SSH_HOST }} `
-          | Out-File -Append "$sshDir\known_hosts"
+        # known_hosts
+        ssh-keyscan -H ${{ vars.AZURE_SSH_HOST }} |
+          Out-File -Append "$sshDir\known_hosts"
 
-        # 권한 제한
+        # Restrict permissions
         icacls "$sshDir\id_rsa" /inheritance:r
         icacls "$sshDir\id_rsa" /grant:r "$($env:USERNAME):(R)"
 
     # ------------------------------------------------------------
-    # 8. SSH 연결 테스트 (문제 있으면 여기서 바로 실패)
+    # 8. Test SSH connection (⭐ KEX 강제 지정)
     # ------------------------------------------------------------
     - name: Test SSH connection
       shell: pwsh
       run: |
         ssh `
+          -o KexAlgorithms=curve25519-sha256 `
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
           "echo SSH connection OK"
 
@@ -125,7 +126,9 @@ jobs:
       run: |
         $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
-        rsync -av artifacts/ `
+        rsync -av `
+          -e "ssh -o KexAlgorithms=curve25519-sha256" `
+          artifacts/ `
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${channel}_staging/
 
     # ------------------------------------------------------------
@@ -136,7 +139,9 @@ jobs:
       run: |
         $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
-        ssh ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
+        ssh `
+          -o KexAlgorithms=curve25519-sha256 `
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
           "set -e
            rm -rf /var/www/velopack/releases/${channel}_old || true
            mv /var/www/velopack/releases/${channel} /var/www/velopack/releases/${channel}_old || true
