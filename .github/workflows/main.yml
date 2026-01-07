@@ -117,7 +117,7 @@ jobs:
     # ------------------------------------------------------------
     - name: Publish (solution based)
       run: >
-        dotnet publish VeloUpdateSystem.sln
+        dotnet publish VeloUpdateSystem.slnx
         -c Release
         -r win-x64
         --self-contained false
