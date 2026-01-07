@@ -1,4 +1,4 @@
-name: Velopack Build & Deploy (Ubuntu)
+name: Velopack Build & Deploy
 
 on:
   push:
@@ -9,95 +9,121 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+# ============================================================
+# Job 1: Build & Pack (Windows)
+# ============================================================
+  build-pack:
+    runs-on: windows-latest
 
     steps:
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # 1. Checkout
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    # ------------------------------------------------------------
-    # 2. Extract version & channel from tag
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 2. Extract version & channel
+    # --------------------------------------------------------
     - name: Extract version from tag
       id: version
+      shell: pwsh
       run: |
-        TAG="${GITHUB_REF_NAME}"
+        $tag = "${{ github.ref_name }}"
 
-        if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
-          echo "Invalid tag format: $TAG"
+        if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+          Write-Error "Invalid tag format: $tag"
           exit 1
-        fi
+        }
 
-        VERSION="${TAG#v}"
+        $version = $tag.Substring(1)
+        $channel = if ($version -match 'beta') { "beta" } else { "stable" }
 
-        if [[ "$VERSION" == *beta* ]]; then
-          CHANNEL="beta"
-        else
-          CHANNEL="stable"
-        fi
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "channel=$channel" >> $env:GITHUB_OUTPUT
 
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
-
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # 3. Setup .NET SDK
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
 
-    # ------------------------------------------------------------
-    # 4. Publish WPF (win-x64 cross build)
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 4. Publish WPF (Windows native)
+    # --------------------------------------------------------
     - name: Publish WPF
+      shell: pwsh
       run: |
-        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj \
-          -c Release \
-          -r win-x64 \
-          --self-contained false \
-          -o publish \
-          /p:Version=${{ steps.version.outputs.version }} \
-          /p:EnableWindowsTargeting=true
+        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish `
+          /p:Version=${{ steps.version.outputs.version }}
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # 5. Install Velopack CLI
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     - name: Install Velopack
+      shell: pwsh
       run: dotnet tool install -g vpk
 
-    # ------------------------------------------------------------
-    # 6. Velopack pack (⭐ mainExe 명시)
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 6. Velopack pack (Windows only)
+    # --------------------------------------------------------
     - name: Velopack pack
+      shell: pwsh
       run: |
-        vpk pack \
-          --packId VeloUpdateSystem \
-          --packVersion ${{ steps.version.outputs.version }} \
-          --packDir publish \
-          --outputDir artifacts \
-          --channel ${{ steps.version.outputs.channel }} \
+        vpk pack `
+          --packId VeloUpdateSystem `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish `
+          --outputDir artifacts `
+          --channel ${{ steps.version.outputs.channel }} `
           --mainExe VeloUpdateSystem.exe
-          --target win
 
-    # ------------------------------------------------------------
-    # 7. Setup SSH (CI 안정 모드)
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 7. Upload artifacts
+    # --------------------------------------------------------
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: velopack-artifacts
+        path: artifacts/
+
+# ============================================================
+# Job 2: Deploy (Linux)
+# ============================================================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-pack
+
+    steps:
+    # --------------------------------------------------------
+    # 1. Download artifacts
+    # --------------------------------------------------------
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: velopack-artifacts
+        path: artifacts
+
+    # --------------------------------------------------------
+    # 2. Setup SSH
+    # --------------------------------------------------------
     - name: Setup SSH
       run: |
         mkdir -p ~/.ssh
         echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
 
-    # ------------------------------------------------------------
-    # 8. Test SSH connection
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 3. Test SSH connection
+    # --------------------------------------------------------
     - name: Test SSH connection
       run: |
         ssh \
@@ -106,22 +132,24 @@ jobs:
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
           "echo SSH connection OK"
 
-    # ------------------------------------------------------------
-    # 9. Upload artifacts to Azure (staging)
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 4. Upload to server (staging)
+    # --------------------------------------------------------
     - name: Upload to Azure (staging)
       run: |
+        CHANNEL="${{ needs.build-pack.outputs.channel }}"
+
         rsync -av \
           -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
           artifacts/ \
-          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${{ steps.version.outputs.channel }}_staging/
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${CHANNEL}_staging/
 
-    # ------------------------------------------------------------
-    # 10. Atomic deploy (staging → live)
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 5. Atomic deploy
+    # --------------------------------------------------------
     - name: Activate release
       run: |
-        CHANNEL=${{ steps.version.outputs.channel }}
+        CHANNEL="${{ needs.build-pack.outputs.channel }}"
 
         ssh \
           -o StrictHostKeyChecking=no \
@@ -134,12 +162,3 @@ jobs:
           mv /var/www/velopack/releases/${CHANNEL}_staging /var/www/velopack/releases/${CHANNEL}
           rm -rf /var/www/velopack/releases/${CHANNEL}_old
           "
-
-    # ------------------------------------------------------------
-    # 11. Summary
-    # ------------------------------------------------------------
-    - name: Deployment summary
-      run: |
-        echo "Deployment complete"
-        echo "Version : ${{ steps.version.outputs.version }}"
-        echo "Channel : ${{ steps.version.outputs.channel }}"
