@@ -16,6 +16,9 @@ namespace VeloUpdateSystem
     /// </summary>
     public partial class MainWindow : Window
     {
+        public string AppVersion { get; } =
+            $"v{AppVersionProvider.GetVersion()}";
+
         public MainWindow()
         {
             InitializeComponent();
