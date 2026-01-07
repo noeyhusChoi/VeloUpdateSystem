@@ -66,8 +66,7 @@ jobs:
           -c Release `
           -r win-x64 `
           --self-contained false `
-          -o publish `
-          /p:Version=${{ steps.version.outputs.version }}
+          -o publish
 
     # --------------------------------------------------------
     # 5. Install Velopack CLI

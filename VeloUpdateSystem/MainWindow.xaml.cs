@@ -21,6 +21,7 @@ namespace VeloUpdateSystem
 
         public MainWindow()
         {
+            DataContext = this;
             InitializeComponent();
         }
     }

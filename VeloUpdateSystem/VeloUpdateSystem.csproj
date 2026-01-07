@@ -8,11 +8,13 @@
     <UseWPF>true</UseWPF>
 	<GenerateApplicationEntryPoint>false</GenerateApplicationEntryPoint>
     <StartupObject>VeloUpdateSystem.Program</StartupObject>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
 
 	<ItemGroup>
     <PackageReference Include="Velopack" Version="0.0.1298" />
+    <PackageReference Include="MinVer" Version="4.3.0" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>
