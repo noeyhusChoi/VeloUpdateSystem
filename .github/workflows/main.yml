@@ -84,6 +84,7 @@ jobs:
           --outputDir artifacts \
           --channel ${{ steps.version.outputs.channel }} \
           --mainExe VeloUpdateSystem.exe
+          --target win
 
     # ------------------------------------------------------------
     # 7. Setup SSH (CI 안정 모드)
