@@ -8,12 +8,16 @@ on:
 permissions:
   contents: read
 
-jobs:
 # ============================================================
 # Job 1: Build & Pack (Windows)
 # ============================================================
+jobs:
   build-pack:
     runs-on: windows-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
 
     steps:
     # --------------------------------------------------------
@@ -53,7 +57,7 @@ jobs:
         dotnet-version: 8.0.x
 
     # --------------------------------------------------------
-    # 4. Publish WPF (Windows native)
+    # 4. Publish WPF
     # --------------------------------------------------------
     - name: Publish WPF
       shell: pwsh
@@ -145,7 +149,7 @@ jobs:
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${CHANNEL}_staging/
 
     # --------------------------------------------------------
-    # 5. Atomic deploy
+    # 5. Atomic deploy (staging → live)
     # --------------------------------------------------------
     - name: Activate release
       run: |
