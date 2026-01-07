@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read   # GitHub Release 안 쓰므로 read만
+  contents: read
 
 jobs:
   release:
@@ -22,7 +22,7 @@ jobs:
         fetch-depth: 0
 
     # ------------------------------------------------------------
-    # 2. Extract version & channel
+    # 2. Extract version & channel from tag
     # ------------------------------------------------------------
     - name: Extract version from tag
       id: version
@@ -53,74 +53,102 @@ jobs:
     # 4. Publish WPF (csproj 기준)
     # ------------------------------------------------------------
     - name: Publish WPF
-      run: >
-        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj
-        -c Release
-        -r win-x64
-        --self-contained false
-        -o publish
-        /p:Version=${{ steps.version.outputs.version }}
+      shell: pwsh
+      run: |
+        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish `
+          /p:Version=${{ steps.version.outputs.version }}
 
     # ------------------------------------------------------------
     # 5. Install Velopack CLI
     # ------------------------------------------------------------
     - name: Install Velopack
+      shell: pwsh
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 6. Velopack pack
+    # 6. Velopack pack (beta / stable 자동)
     # ------------------------------------------------------------
     - name: Velopack pack
-      run: >
-        vpk pack
-        --packId VeloUpdateSystem
-        --packVersion ${{ steps.version.outputs.version }}
-        --packDir publish
-        --outputDir artifacts
-        --channel ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}
+      shell: pwsh
+      run: |
+        $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
+
+        vpk pack `
+          --packId VeloUpdateSystem `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish `
+          --outputDir artifacts `
+          --channel $channel
 
     # ------------------------------------------------------------
-    # 7. Prepare SSH key
+    # 7. Setup SSH (Windows runner 대응)
     # ------------------------------------------------------------
     - name: Setup SSH
       shell: pwsh
       run: |
-        mkdir ~/.ssh
-        echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ secrets.AZURE_SSH_HOST }} >> ~/.ssh/known_hosts
+        $sshDir = "$env:USERPROFILE\.ssh"
+        New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+        # Private key
+        Set-Content `
+          -Path "$sshDir\id_rsa" `
+          -Value "${{ secrets.AZURE_SSH_KEY }}" `
+          -NoNewline
+
+        # known_hosts (⭐ host 반드시 필요)
+        ssh-keyscan -H ${{ vars.AZURE_SSH_HOST }} `
+          | Out-File -Append "$sshDir\known_hosts"
+
+        # 권한 제한
+        icacls "$sshDir\id_rsa" /inheritance:r
+        icacls "$sshDir\id_rsa" /grant:r "$($env:USERNAME):(R)"
 
     # ------------------------------------------------------------
-    # 8. Upload to Azure server (staging)
+    # 8. SSH 연결 테스트 (문제 있으면 여기서 바로 실패)
+    # ------------------------------------------------------------
+    - name: Test SSH connection
+      shell: pwsh
+      run: |
+        ssh `
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
+          "echo SSH connection OK"
+
+    # ------------------------------------------------------------
+    # 9. Upload artifacts to Azure (staging)
     # ------------------------------------------------------------
     - name: Upload to Azure (staging)
       shell: pwsh
       run: |
-        $channel = "${{ steps.version.outputs.isBeta }}" -eq "True" ? "beta" : "stable"
+        $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
         rsync -av artifacts/ `
-          ${{ secrets.AZURE_SSH_USER }}@${{ secrets.AZURE_SSH_HOST }}:/var/www/velopack/releases/${channel}_staging/
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${channel}_staging/
 
     # ------------------------------------------------------------
-    # 9. Atomic deploy (staging → live)
+    # 10. Atomic deploy (staging → live)
     # ------------------------------------------------------------
     - name: Activate release
       shell: pwsh
       run: |
-        $channel = "${{ steps.version.outputs.isBeta }}" -eq "True" ? "beta" : "stable"
+        $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
-        ssh ${{ secrets.AZURE_SSH_USER }}@${{ secrets.AZURE_SSH_HOST }} `
+        ssh ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
           "set -e
            rm -rf /var/www/velopack/releases/${channel}_old || true
            mv /var/www/velopack/releases/${channel} /var/www/velopack/releases/${channel}_old || true
            mv /var/www/velopack/releases/${channel}_staging /var/www/velopack/releases/${channel}
            rm -rf /var/www/velopack/releases/${channel}_old"
-           
+
     # ------------------------------------------------------------
-    # 10. Summary
+    # 11. Summary
     # ------------------------------------------------------------
     - name: Deployment summary
+      shell: pwsh
       run: |
         echo "Deployment complete"
         echo "Version : ${{ steps.version.outputs.version }}"
-        echo "Channel : ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}"
+        echo "Channel : $(if ('${{ steps.version.outputs.isBeta }}' -eq 'True') { 'beta' } else { 'stable' })"
