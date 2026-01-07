@@ -1,9 +1,12 @@
-name: Velopack Release
+name: Velopack Release (Private Server)
 
 on:
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: read   # GitHub Release 안 쓰므로 read만
 
 jobs:
   release:
@@ -11,7 +14,7 @@ jobs:
 
     steps:
     # ------------------------------------------------------------
-    # 1. Checkout (full history required for guards)
+    # 1. Checkout
     # ------------------------------------------------------------
     - name: Checkout
       uses: actions/checkout@v4
@@ -19,7 +22,7 @@ jobs:
         fetch-depth: 0
 
     # ------------------------------------------------------------
-    # 2. Extract version & channel from tag
+    # 2. Extract version & channel
     # ------------------------------------------------------------
     - name: Extract version from tag
       id: version
@@ -28,7 +31,7 @@ jobs:
         $tag = "${{ github.ref_name }}"
 
         if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') {
-          Write-Error "❌ Invalid tag format: $tag"
+          Write-Error "Invalid tag format: $tag"
           exit 1
         }
 
@@ -39,73 +42,7 @@ jobs:
         echo "isBeta=$isBeta" >> $env:GITHUB_OUTPUT
 
     # ------------------------------------------------------------
-    # 3. Tag must point to HEAD (no tag on old commit)
-    # ------------------------------------------------------------
-    - name: Verify tag points to HEAD
-      shell: pwsh
-      run: |
-        $head = git rev-parse HEAD
-        $tagCommit = git rev-list -n 1 ${{ github.ref_name }}
-
-        if ($head -ne $tagCommit) {
-          Write-Error "❌ Tag does not point to HEAD"
-          exit 1
-        }
-
-    # ------------------------------------------------------------
-    # 4. Prevent same-version redeploy (GitHub Release 기준)
-    # ------------------------------------------------------------
-    - name: Check existing GitHub Release
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const tag = '${{ github.ref_name }}';
-          try {
-            await github.rest.repos.getReleaseByTag({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag
-            });
-            core.setFailed(`❌ Release for ${tag} already exists`);
-          } catch (e) {
-            // OK: release does not exist
-          }
-
-    # ------------------------------------------------------------
-    # 5. Ensure code changed since previous tag
-    # ------------------------------------------------------------
-    - name: Check diff from previous tag
-      shell: pwsh
-      run: |
-        $tags = git tag --sort=-creatordate
-        $prev = $tags | Select-Object -Skip 1 -First 1
-
-        if ($null -ne $prev) {
-          $diff = git diff --name-only $prev HEAD
-          if (-not $diff) {
-            Write-Error "❌ No code changes since previous release ($prev)"
-            exit 1
-          }
-        }
-
-    # ------------------------------------------------------------
-    # 6. Stable requires beta history (권장 가드)
-    # ------------------------------------------------------------
-    - name: Ensure beta existed before stable
-      if: steps.version.outputs.isBeta == 'False'
-      shell: pwsh
-      run: |
-        $version = "${{ steps.version.outputs.version }}"
-        $base = $version.Split('-')[0]
-
-        $betas = git tag | Where-Object { $_ -match "^v$base-beta\.\d+$" }
-        if (-not $betas) {
-          Write-Error "❌ No beta tag found for $base"
-          exit 1
-        }
-
-    # ------------------------------------------------------------
-    # 7. Setup .NET
+    # 3. Setup .NET
     # ------------------------------------------------------------
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
@@ -113,28 +50,25 @@ jobs:
         dotnet-version: 8.0.x
 
     # ------------------------------------------------------------
-    # 8. Build / Publish
+    # 4. Publish WPF (csproj 기준)
     # ------------------------------------------------------------
-    - name: Publish (solution based)
+    - name: Publish WPF
       run: >
-        dotnet publish VeloUpdateSystem.slnx
+        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj
         -c Release
         -r win-x64
         --self-contained false
         -o publish
         /p:Version=${{ steps.version.outputs.version }}
 
-      # ❗ 만약 csproj 단일 프로젝트라면 위 대신 아래 사용
-      # dotnet publish MyKioskApp.csproj ...
-
     # ------------------------------------------------------------
-    # 9. Install Velopack CLI
+    # 5. Install Velopack CLI
     # ------------------------------------------------------------
     - name: Install Velopack
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 10. Velopack pack (beta / stable 자동 분기)
+    # 6. Velopack pack
     # ------------------------------------------------------------
     - name: Velopack pack
       run: >
@@ -146,21 +80,47 @@ jobs:
         --channel ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}
 
     # ------------------------------------------------------------
-    # 11. Create GitHub Release
+    # 7. Prepare SSH key
     # ------------------------------------------------------------
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        files: artifacts/**
+    - name: Setup SSH
+      shell: pwsh
+      run: |
+        mkdir ~/.ssh
+        echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.AZURE_SSH_HOST }} >> ~/.ssh/known_hosts
 
     # ------------------------------------------------------------
-    # 12. Final summary (human sanity check)
+    # 8. Upload to Azure server (staging)
+    # ------------------------------------------------------------
+    - name: Upload to Azure (staging)
+      shell: pwsh
+      run: |
+        $channel = "${{ steps.version.outputs.isBeta }}" -eq "True" ? "beta" : "stable"
+
+        rsync -av artifacts/ `
+          ${{ secrets.AZURE_SSH_USER }}@${{ secrets.AZURE_SSH_HOST }}:/var/www/velopack/releases/${channel}_staging/
+
+    # ------------------------------------------------------------
+    # 9. Atomic deploy (staging → live)
+    # ------------------------------------------------------------
+    - name: Activate release
+      shell: pwsh
+      run: |
+        $channel = "${{ steps.version.outputs.isBeta }}" -eq "True" ? "beta" : "stable"
+
+        ssh ${{ secrets.AZURE_SSH_USER }}@${{ secrets.AZURE_SSH_HOST }} `
+          "set -e
+           rm -rf /var/www/velopack/releases/${channel}_old || true
+           mv /var/www/velopack/releases/${channel} /var/www/velopack/releases/${channel}_old || true
+           mv /var/www/velopack/releases/${channel}_staging /var/www/velopack/releases/${channel}
+           rm -rf /var/www/velopack/releases/${channel}_old"
+           
+    # ------------------------------------------------------------
+    # 10. Summary
     # ------------------------------------------------------------
     - name: Deployment summary
       run: |
-        echo "✅ Release completed"
+        echo "Deployment complete"
         echo "Version : ${{ steps.version.outputs.version }}"
         echo "Channel : ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}"
-        echo "Commit  : ${{ github.sha }}"
