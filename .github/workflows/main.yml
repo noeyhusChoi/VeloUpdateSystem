@@ -1,0 +1,163 @@
+name: Velopack Release (No Approval)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+    # ------------------------------------------------------------
+    # 1. Checkout (full history for guards)
+    # ------------------------------------------------------------
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # ------------------------------------------------------------
+    # 2. Extract version / channel from tag
+    # ------------------------------------------------------------
+    - name: Extract version from tag
+      id: version
+      shell: pwsh
+      run: |
+        $tag = "${{ github.ref_name }}"
+
+        if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+          Write-Error "❌ Invalid tag format: $tag"
+          exit 1
+        }
+
+        $version = $tag.Substring(1)
+        $isBeta = $version -match 'beta'
+
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "isBeta=$isBeta" >> $env:GITHUB_OUTPUT
+
+    # ------------------------------------------------------------
+    # 3. Tag must point to HEAD
+    # ------------------------------------------------------------
+    - name: Verify tag points to HEAD
+      shell: pwsh
+      run: |
+        $head = git rev-parse HEAD
+        $tagCommit = git rev-list -n 1 ${{ github.ref_name }}
+
+        if ($head -ne $tagCommit) {
+          Write-Error "❌ Tag does not point to HEAD"
+          exit 1
+        }
+
+    # ------------------------------------------------------------
+    # 4. Prevent same-version redeploy (GitHub Release 기준)
+    # ------------------------------------------------------------
+    - name: Check existing GitHub Release
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const tag = '${{ github.ref_name }}';
+          try {
+            await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag
+            });
+            core.setFailed(`❌ Release for ${tag} already exists`);
+          } catch (e) {
+            // OK: release does not exist
+          }
+
+    # ------------------------------------------------------------
+    # 5. Ensure code actually changed since previous tag
+    # ------------------------------------------------------------
+    - name: Check diff from previous tag
+      shell: pwsh
+      run: |
+        $tags = git tag --sort=-creatordate
+        $prev = $tags | Select-Object -Skip 1 -First 1
+
+        if ($null -ne $prev) {
+          $diff = git diff --name-only $prev HEAD
+          if (-not $diff) {
+            Write-Error "❌ No code changes since previous release ($prev)"
+            exit 1
+          }
+        }
+
+    # ------------------------------------------------------------
+    # 6. Stable requires beta history (optional but recommended)
+    # ------------------------------------------------------------
+    - name: Ensure beta existed before stable
+      if: steps.version.outputs.isBeta == 'False'
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.version }}"
+        $base = $version.Split('-')[0]
+
+        $betas = git tag | Where-Object { $_ -match "^v$base-beta\.\d+$" }
+        if (-not $betas) {
+          Write-Error "❌ No beta tag found for $base"
+          exit 1
+        }
+
+    # ------------------------------------------------------------
+    # 7. Setup .NET
+    # ------------------------------------------------------------
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    # ------------------------------------------------------------
+    # 8. Build / Publish (version injected)
+    # ------------------------------------------------------------
+    - name: Publish WPF
+      run: >
+        dotnet publish src/MyKioskApp/MyKioskApp.csproj
+        -c Release
+        -r win-x64
+        --self-contained false
+        -o publish
+        /p:Version=${{ steps.version.outputs.version }}
+
+    # ------------------------------------------------------------
+    # 9. Install Velopack
+    # ------------------------------------------------------------
+    - name: Install Velopack
+      run: dotnet tool install -g vpk
+
+    # ------------------------------------------------------------
+    # 10. Velopack pack (beta / stable auto)
+    # ------------------------------------------------------------
+    - name: Velopack pack
+      run: >
+        vpk pack
+        --packId MyKioskApp
+        --packVersion ${{ steps.version.outputs.version }}
+        --packDir publish
+        --outputDir artifacts
+        --channel ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}
+
+    # ------------------------------------------------------------
+    # 11. Create GitHub Release
+    # ------------------------------------------------------------
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
+        files: artifacts/**
+
+    # ------------------------------------------------------------
+    # 12. Final summary (sanity check)
+    # ------------------------------------------------------------
+    - name: Deployment summary
+      run: |
+        echo "✅ Release completed"
+        echo "Version : ${{ steps.version.outputs.version }}"
+        echo "Channel : ${{ steps.version.outputs.isBeta == 'True' && 'beta' || 'stable' }}"
+        echo "Commit  : ${{ github.sha }}"
