@@ -70,7 +70,7 @@ jobs:
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 6. Velopack pack
+    # 6. Velopack pack (beta / stable)
     # ------------------------------------------------------------
     - name: Velopack pack
       shell: pwsh
@@ -85,7 +85,7 @@ jobs:
           --channel $channel
 
     # ------------------------------------------------------------
-    # 7. Setup SSH (Windows runner + KEX 호환)
+    # 7. Setup SSH (key only, no keyscan)
     # ------------------------------------------------------------
     - name: Setup SSH
       shell: pwsh
@@ -93,27 +93,22 @@ jobs:
         $sshDir = "$env:USERPROFILE\.ssh"
         New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
 
-        # Private key
         Set-Content `
           -Path "$sshDir\id_rsa" `
           -Value "${{ secrets.AZURE_SSH_KEY }}" `
           -NoNewline
 
-        # known_hosts
-        ssh-keyscan -H ${{ vars.AZURE_SSH_HOST }} |
-          Out-File -Append "$sshDir\known_hosts"
-
-        # Restrict permissions
         icacls "$sshDir\id_rsa" /inheritance:r
         icacls "$sshDir\id_rsa" /grant:r "$($env:USERNAME):(R)"
 
     # ------------------------------------------------------------
-    # 8. Test SSH connection (⭐ KEX 강제 지정)
+    # 8. Test SSH connection (⭐ 핵심 옵션)
     # ------------------------------------------------------------
     - name: Test SSH connection
       shell: pwsh
       run: |
         ssh `
+          -o StrictHostKeyChecking=no `
           -o KexAlgorithms=curve25519-sha256 `
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
           "echo SSH connection OK"
@@ -127,7 +122,7 @@ jobs:
         $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
         rsync -av `
-          -e "ssh -o KexAlgorithms=curve25519-sha256" `
+          -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" `
           artifacts/ `
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${channel}_staging/
 
@@ -140,6 +135,7 @@ jobs:
         $channel = if ("${{ steps.version.outputs.isBeta }}" -eq "True") { "beta" } else { "stable" }
 
         ssh `
+          -o StrictHostKeyChecking=no `
           -o KexAlgorithms=curve25519-sha256 `
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} `
           "set -e
