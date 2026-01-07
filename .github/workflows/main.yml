@@ -73,17 +73,17 @@ jobs:
       run: dotnet tool install -g vpk
 
     # ------------------------------------------------------------
-    # 6. Velopack pack
+    # 6. Velopack pack (⭐ mainExe 명시)
     # ------------------------------------------------------------
     - name: Velopack pack
-    run: |
+      run: |
         vpk pack \
-        --packId VeloUpdateSystem \
-        --packVersion ${{ steps.version.outputs.version }} \
-        --packDir publish \
-        --outputDir artifacts \
-        --channel ${{ steps.version.outputs.channel }} \
-        --mainExe VeloUpdateSystem.exe
+          --packId VeloUpdateSystem \
+          --packVersion ${{ steps.version.outputs.version }} \
+          --packDir publish \
+          --outputDir artifacts \
+          --channel ${{ steps.version.outputs.channel }} \
+          --mainExe VeloUpdateSystem.exe
 
     # ------------------------------------------------------------
     # 7. Setup SSH (CI 안정 모드)
