@@ -81,6 +81,33 @@ jobs:
     # --------------------------------------------------------
     # 6. Velopack pack (Windows only)
     # --------------------------------------------------------
+    - name: Seed previous releases for delta
+      shell: pwsh
+      run: |
+        $channel = "${{ steps.version.outputs.channel }}"
+        $seedUrl = "http://4.218.15.147/releases/app/$channel/current/"
+        $target = "artifacts_app"
+
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+
+        $listing = $null
+        try {
+          $listing = Invoke-WebRequest -Uri $seedUrl -UseBasicParsing
+        } catch {
+          Write-Host "No seed releases found at $seedUrl"
+        }
+
+        if ($listing -and $listing.Links) {
+          foreach ($link in $listing.Links) {
+            if ($link.href -match '\.nupkg$' -or $link.href -match '\.json$') {
+              $uri = if ($link.href -match '^https?://') { $link.href } else { $seedUrl + $link.href }
+              $file = Join-Path $target (Split-Path $link.href -Leaf)
+              Write-Host "Seeding $uri"
+              Invoke-WebRequest -Uri $uri -OutFile $file -UseBasicParsing
+            }
+          }
+        }
+
     - name: Velopack pack
       shell: pwsh
       run: |
