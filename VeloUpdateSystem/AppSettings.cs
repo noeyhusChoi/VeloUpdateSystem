@@ -6,7 +6,7 @@ namespace VeloUpdateSystem;
 
 public sealed class AppSettings
 {
-    public string UpdateUrl { get; init; } = "http://4.218.15.147/releases/app/stable/";
+    public string UpdateUrlTemplate { get; init; } = "http://4.218.15.147/releases/app/{channel}/";
     public string Channel { get; init; } = "stable";
     public int PollIntervalMinutes { get; init; } = 60;
     public int IdleSecondsBeforeApply { get; init; } = 60;
@@ -33,7 +33,7 @@ public sealed class AppSettings
 
             return new AppSettings
             {
-                UpdateUrl = GetString(app, "UpdateUrl") ?? "http://4.218.15.147/releases/app/stable/",
+                UpdateUrlTemplate = GetString(app, "UpdateUrlTemplate") ?? "http://4.218.15.147/releases/app/{channel}/",
                 Channel = GetString(app, "Channel") ?? "stable",
                 PollIntervalMinutes = GetInt(app, "PollIntervalMinutes", 60),
                 IdleSecondsBeforeApply = GetInt(app, "IdleSecondsBeforeApply", 60),
@@ -56,5 +56,11 @@ public sealed class AppSettings
         return element.TryGetProperty(name, out var value) && value.TryGetInt32(out var parsed)
             ? parsed
             : fallback;
+    }
+
+    public string GetUpdateUrl()
+    {
+        var url = UpdateUrlTemplate.Replace("{channel}", Channel, StringComparison.OrdinalIgnoreCase);
+        return url.EndsWith("/") ? url : url + "/";
     }
 }
