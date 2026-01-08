@@ -15,6 +15,17 @@
                 FontSize="12"
                 Foreground="Black"
                 Opacity="0.7"
+                Text="{Binding CurrentVersionDisplay}" />
+            <TextBlock
+                Margin="0,4,0,0"
+                FontSize="12"
+                Foreground="Black"
+                Opacity="0.7"
+                Text="{Binding AvailableVersionDisplay}" />
+            <TextBlock
+                FontSize="12"
+                Foreground="Black"
+                Opacity="0.7"
                 Text="{Binding WatchdogStatus}" />
             <TextBlock
                 Margin="0,6,0,0"

@@ -32,6 +32,8 @@ namespace VeloUpdateSystem
         private DateTimeOffset _lastInputUtc = DateTimeOffset.UtcNow;
         private string _watchdogStatus = "Watchdog: unknown";
         private string _updateStatus = "Update: idle";
+        private string _currentVersionDisplay = "Current: unknown";
+        private string _availableVersionDisplay = "Available: n/a";
         private UpdateInfo? _pendingUpdate;
         private bool _updateDownloaded;
         private bool _applyRequested;
@@ -66,6 +68,32 @@ namespace VeloUpdateSystem
             }
         }
 
+        public string CurrentVersionDisplay
+        {
+            get => _currentVersionDisplay;
+            private set
+            {
+                if (_currentVersionDisplay != value)
+                {
+                    _currentVersionDisplay = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(CurrentVersionDisplay)));
+                }
+            }
+        }
+
+        public string AvailableVersionDisplay
+        {
+            get => _availableVersionDisplay;
+            private set
+            {
+                if (_availableVersionDisplay != value)
+                {
+                    _availableVersionDisplay = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(AvailableVersionDisplay)));
+                }
+            }
+        }
+
         public MainWindow()
         {
             DataContext = this;
@@ -77,6 +105,7 @@ namespace VeloUpdateSystem
             _updateManager = new UpdateManager(
                 _settings.UpdateUrl,
                 new UpdateOptions { ExplicitChannel = _settings.Channel });
+            CurrentVersionDisplay = $"Current: {_updateManager.CurrentVersion?.ToString() ?? AppVersionProvider.GetVersion()}";
 
             _heartbeatTimer = new DispatcherTimer
             {
@@ -194,10 +223,12 @@ namespace VeloUpdateSystem
                     _pendingUpdate = null;
                     _updateDownloaded = false;
                     SetUpdateStatus("Update: idle");
+                    SetAvailableVersion("Available: n/a");
                     return;
                 }
 
                 _pendingUpdate = updateInfo;
+                SetAvailableVersion($"Available: {updateInfo.TargetFullRelease?.Version}");
                 SetUpdateStatus($"Update: downloading {updateInfo.TargetFullRelease?.Version}");
                 await _updateManager.DownloadUpdatesAsync(updateInfo, progress =>
                 {
@@ -212,6 +243,7 @@ namespace VeloUpdateSystem
                 _pendingUpdate = null;
                 _updateDownloaded = false;
                 SetUpdateStatus("Update: not installed");
+                SetAvailableVersion("Available: n/a");
             }
             catch (Exception ex)
             {
@@ -270,6 +302,17 @@ namespace VeloUpdateSystem
             }
 
             Dispatcher.Invoke(() => UpdateStatus = value);
+        }
+
+        private void SetAvailableVersion(string value)
+        {
+            if (Dispatcher.CheckAccess())
+            {
+                AvailableVersionDisplay = value;
+                return;
+            }
+
+            Dispatcher.Invoke(() => AvailableVersionDisplay = value);
         }
 
         private async void OnIdleApplyClick(object sender, RoutedEventArgs e)
