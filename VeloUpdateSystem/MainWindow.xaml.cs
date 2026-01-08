@@ -117,7 +117,7 @@ namespace VeloUpdateSystem
             _settings = AppSettings.Load();
             _watchdogClient = new WatchdogIpcClient(_settings.WatchdogBaseUri);
             _updateManager = new UpdateManager(
-                _settings.UpdateUrl,
+                _settings.GetUpdateUrl(),
                 new UpdateOptions { ExplicitChannel = _settings.Channel });
             CurrentVersionDisplay = $"Current: {_updateManager.CurrentVersion?.ToString() ?? AppVersionProvider.GetVersion()}";
 
