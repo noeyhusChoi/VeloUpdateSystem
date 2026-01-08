@@ -102,6 +102,7 @@ public sealed class UpdateAgentService : BackgroundService
     private Velopack.Locators.IVelopackLocator CreateLocator()
     {
         var windowsLocator = new WindowsVelopackLocator(_options.PackId, (uint)Environment.ProcessId, null);
+        LogLocatorDetails(windowsLocator);
         if (windowsLocator.CurrentlyInstalledVersion != null)
         {
             _logger.LogInformation(
@@ -276,5 +277,35 @@ public sealed class UpdateAgentService : BackgroundService
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+
+    private void LogLocatorDetails(IVelopackLocator locator)
+    {
+        var type = locator.GetType();
+        var propertyNames = new[]
+        {
+            "RootAppDir",
+            "AppDir",
+            "PackagesDir",
+            "UpdateExe",
+            "UpdateExePath",
+            "ProcessPath",
+            "RootDir"
+        };
+
+        foreach (var name in propertyNames)
+        {
+            var property = type.GetProperty(name);
+            if (property is null)
+            {
+                continue;
+            }
+
+            var value = property.GetValue(locator);
+            if (value is not null)
+            {
+                _logger.LogInformation("Locator {Type} {Name}={Value}", type.Name, name, value);
+            }
+        }
+    }
 
 }
