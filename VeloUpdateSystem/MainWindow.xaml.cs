@@ -34,6 +34,7 @@ namespace VeloUpdateSystem
         private string _updateStatus = "Update: idle";
         private string _currentVersionDisplay = "Current: unknown";
         private string _availableVersionDisplay = "Available: n/a";
+        private string _downloadStatus = "Download: idle";
         private UpdateInfo? _pendingUpdate;
         private bool _updateDownloaded;
         private bool _applyRequested;
@@ -90,6 +91,19 @@ namespace VeloUpdateSystem
                 {
                     _availableVersionDisplay = value;
                     PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(AvailableVersionDisplay)));
+                }
+            }
+        }
+
+        public string DownloadStatus
+        {
+            get => _downloadStatus;
+            private set
+            {
+                if (_downloadStatus != value)
+                {
+                    _downloadStatus = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(DownloadStatus)));
                 }
             }
         }
@@ -224,18 +238,21 @@ namespace VeloUpdateSystem
                     _updateDownloaded = false;
                     SetUpdateStatus("Update: idle");
                     SetAvailableVersion("Available: n/a");
+                    SetDownloadStatus("Download: idle");
                     return;
                 }
 
                 _pendingUpdate = updateInfo;
                 SetAvailableVersion($"Available: {updateInfo.TargetFullRelease?.Version}");
                 SetUpdateStatus($"Update: downloading {updateInfo.TargetFullRelease?.Version}");
+                SetDownloadStatus("Download: in progress");
                 await _updateManager.DownloadUpdatesAsync(updateInfo, progress =>
                 {
                     SetUpdateStatus($"Update: downloading {progress}%");
                 }, cancellationToken).ConfigureAwait(false);
 
                 _updateDownloaded = true;
+                SetDownloadStatus("Download: complete");
                 SetUpdateStatus($"Update: ready {updateInfo.TargetFullRelease?.Version}");
             }
             catch (Velopack.Exceptions.NotInstalledException)
@@ -244,11 +261,13 @@ namespace VeloUpdateSystem
                 _updateDownloaded = false;
                 SetUpdateStatus("Update: not installed");
                 SetAvailableVersion("Available: n/a");
+                SetDownloadStatus("Download: idle");
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Update check failed: {ex}");
                 SetUpdateStatus("Update: error");
+                SetDownloadStatus("Download: error");
             }
             finally
             {
@@ -313,6 +332,17 @@ namespace VeloUpdateSystem
             }
 
             Dispatcher.Invoke(() => AvailableVersionDisplay = value);
+        }
+
+        private void SetDownloadStatus(string value)
+        {
+            if (Dispatcher.CheckAccess())
+            {
+                DownloadStatus = value;
+                return;
+            }
+
+            Dispatcher.Invoke(() => DownloadStatus = value);
         }
 
         private async void OnIdleApplyClick(object sender, RoutedEventArgs e)
