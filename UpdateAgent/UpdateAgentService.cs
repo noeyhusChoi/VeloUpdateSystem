@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Xml.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -11,6 +13,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NuGet.Versioning;
 using Velopack;
 using Velopack.Locators;
 
@@ -101,6 +104,37 @@ public sealed class UpdateAgentService : BackgroundService
 
     private Velopack.Locators.IVelopackLocator CreateLocator()
     {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var localRoot = Path.Combine(localAppData, _options.PackId);
+        var currentDir = Path.Combine(localRoot, "current");
+        var versionFile = Path.Combine(currentDir, "sq.version");
+        var localPackagesRoot = Path.Combine(localRoot, "packages");
+
+        _logger.LogInformation(
+            "Checking app install: Root={Root} VersionFile={VersionFile} Exists={Exists}",
+            localRoot,
+            versionFile,
+            File.Exists(versionFile));
+
+        if (File.Exists(versionFile))
+        {
+            var versionText = TryReadVersionFromSqVersion(versionFile);
+            if (!string.IsNullOrWhiteSpace(versionText) && SemanticVersion.TryParse(versionText, out var parsedVersion))
+            {
+                _logger.LogInformation(
+                    "Installed app detected under {Root}. Using version {Version}.",
+                    localRoot,
+                    parsedVersion);
+                Directory.CreateDirectory(localPackagesRoot);
+                return new TestVelopackLocator(_options.PackId, parsedVersion.ToString(), localPackagesRoot, null);
+            }
+
+            _logger.LogWarning(
+                "Installed files detected under {Root} but version was invalid. Raw={Raw}",
+                localRoot,
+                TruncateForLog(versionText));
+        }
+
         var windowsLocator = new WindowsVelopackLocator(_options.PackId, (uint)Environment.ProcessId, null);
         LogLocatorDetails(windowsLocator);
         if (windowsLocator.CurrentlyInstalledVersion != null)
@@ -108,12 +142,14 @@ public sealed class UpdateAgentService : BackgroundService
             _logger.LogInformation(
                 "Installed version detected: {Version}.",
                 windowsLocator.CurrentlyInstalledVersion.ToString());
-            return windowsLocator;
+        }
+        else
+        {
+            _logger.LogInformation(
+                "App not installed for PackId {PackId}. WindowsVelopackLocator has no current version.",
+                _options.PackId);
         }
 
-        _logger.LogInformation(
-            "App not installed for PackId {PackId}. WindowsVelopackLocator has no current version.",
-            _options.PackId);
         return windowsLocator;
     }
 
@@ -306,6 +342,43 @@ public sealed class UpdateAgentService : BackgroundService
                 _logger.LogInformation("Locator {Type} {Name}={Value}", type.Name, name, value);
             }
         }
+    }
+
+    private static string? TryReadVersionFromSqVersion(string versionFile)
+    {
+        var text = File.ReadAllText(versionFile).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if (text.StartsWith("<", StringComparison.Ordinal))
+        {
+            try
+            {
+                var doc = XDocument.Parse(text);
+                var versionElement = doc.Descendants()
+                    .FirstOrDefault(element =>
+                        string.Equals(element.Name.LocalName, "version", StringComparison.OrdinalIgnoreCase));
+                return versionElement?.Value?.Trim();
+            }
+            catch
+            {
+                return text;
+            }
+        }
+
+        return text;
+    }
+
+    private static string TruncateForLog(string? value, int maxLength = 160)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "null";
+        }
+
+        return value.Length <= maxLength ? value : value.Substring(0, maxLength) + "...";
     }
 
 }
