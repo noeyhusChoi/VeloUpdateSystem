@@ -90,22 +90,24 @@ jobs:
 
         New-Item -ItemType Directory -Force -Path $target | Out-Null
 
-        $listing = $null
+        $releasesFile = if ($channel -eq "beta") { "releases.beta.json" } else { "releases.json" }
+        $releasesUrl = $seedUrl + $releasesFile
+        $releasesPath = Join-Path $target $releasesFile
+
         try {
-          $listing = Invoke-WebRequest -Uri $seedUrl -UseBasicParsing
+          Invoke-WebRequest -Uri $releasesUrl -OutFile $releasesPath -UseBasicParsing
         } catch {
-          Write-Host "No seed releases found at $seedUrl"
+          Write-Host "No seed releases found at $releasesUrl"
+          exit 0
         }
 
-        if ($listing -and $listing.Links) {
-          foreach ($link in $listing.Links) {
-            if ($link.href -match '\.nupkg$' -or $link.href -match '\.json$') {
-              $uri = if ($link.href -match '^https?://') { $link.href } else { $seedUrl + $link.href }
-              $file = Join-Path $target (Split-Path $link.href -Leaf)
-              Write-Host "Seeding $uri"
-              Invoke-WebRequest -Uri $uri -OutFile $file -UseBasicParsing
-            }
-          }
+        $content = Get-Content -Path $releasesPath -Raw
+        $matches = [regex]::Matches($content, '[^"\\s]+\\.nupkg') | ForEach-Object { $_.Value } | Sort-Object -Unique
+        foreach ($pkg in $matches) {
+          $pkgUrl = $seedUrl + $pkg
+          $pkgPath = Join-Path $target $pkg
+          Write-Host "Seeding $pkgUrl"
+          Invoke-WebRequest -Uri $pkgUrl -OutFile $pkgPath -UseBasicParsing
         }
 
     - name: Velopack pack
