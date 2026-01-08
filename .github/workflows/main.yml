@@ -166,6 +166,7 @@ jobs:
           --outputDir artifacts_agent `
           --channel ${{ steps.version.outputs.channel }} `
           --mainExe UpdateAgent.exe `
+          --skipVeloAppCheck `
           --msiDeploymentTool
 
     - name: Upload artifacts
@@ -256,7 +257,8 @@ jobs:
           --packDir publish_agent `
           --outputDir artifacts_agent `
           --channel ${{ steps.version.outputs.channel }} `
-          --mainExe UpdateAgent.exe
+          --mainExe UpdateAgent.exe `
+          --skipVeloAppCheck
 
     - name: Build bootstrap bundle
       shell: pwsh
