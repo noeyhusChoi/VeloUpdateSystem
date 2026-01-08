@@ -265,21 +265,23 @@ jobs:
         Copy-Item artifacts_app\Setup.exe bootstrap\AppSetup.exe
         Copy-Item artifacts_agent\Setup.exe bootstrap\AgentSetup.exe
 
-        @'
-param(
-    [switch]$Silent
-)
+        $script = @(
+          'param(',
+          '    [switch]$Silent',
+          ')',
+          '',
+          '$appArgs = @()',
+          '$agentArgs = @()',
+          'if ($Silent) {',
+          '    $appArgs += "--silent"',
+          '    $agentArgs += "--silent"',
+          '}',
+          '',
+          'Start-Process -FilePath ".\\AppSetup.exe" -ArgumentList $appArgs -Wait',
+          'Start-Process -FilePath ".\\AgentSetup.exe" -ArgumentList $agentArgs -Wait'
+        )
 
-$appArgs = @()
-$agentArgs = @()
-if ($Silent) {
-    $appArgs += "--silent"
-    $agentArgs += "--silent"
-}
-
-Start-Process -FilePath ".\\AppSetup.exe" -ArgumentList $appArgs -Wait
-Start-Process -FilePath ".\\AgentSetup.exe" -ArgumentList $agentArgs -Wait
-'@ | Out-File -FilePath bootstrap\install.ps1 -Encoding ASCII
+        $script | Out-File -FilePath bootstrap\\install.ps1 -Encoding ASCII
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
