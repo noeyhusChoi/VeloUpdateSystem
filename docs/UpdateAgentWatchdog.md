@@ -39,10 +39,9 @@ UpdateAgent and Watchdog that manage a Velopack-updated WPF app.
 - Agent <-> Watchdog pipe is LocalSystem restricted.
 
 ## 5. IPC Transport
-- Named Pipes
-- App <-> Agent: `\\.\pipe\Moneybox.Agent`
-- Agent <-> Watchdog: `\\.\pipe\Moneybox.Watchdog`
-- Watchdog <-> App: `\\.\pipe\Moneybox.Watchdog.App` (optional)
+- HTTP (localhost)
+  - App -> Agent: `POST http://127.0.0.1:{HttpPort}/heartbeat`
+  - App <- Agent: `GET  http://127.0.0.1:{HttpPort}/status`
 - Payload encoding: JSON
 
 ## 6. Message Envelope (Standard)
@@ -84,34 +83,10 @@ UpdateAgent and Watchdog that manage a Velopack-updated WPF app.
   - Payload: `{ "reason": "updateInstall", "timeoutSec": 30 }`
 
 ### Agent <-> Watchdog
-#### `WatchdogStatus` (Agent -> Watchdog)
-- Required fields:
-  - `appPid` (int or null)
-  - `agentPid` (int)
-  - `appExpected` (bool)
-  - `appRunning` (bool)
-  - `hangDetected` (bool)
-- Example:
-  - `{ "appPid": 1234, "agentPid": 4321, "appExpected": true, "appRunning": true, "hangDetected": false }`
+- IPC removed (Watchdog is process monitor only).
 
-#### `Restart` (Agent -> Watchdog)
-- Required fields:
-  - `target` ("App" | "Agent")
-  - `reason` ("updateInstalled" | "hung" | "crash" | "agentRequest")
-  - `minDelaySec` (int)
-- Example:
-  - `{ "target": "App", "reason": "updateInstalled", "minDelaySec": 5 }`
-
-#### `ProcessMissing` (Watchdog -> Agent)
-- Required fields:
-  - `target` ("App" | "Agent")
-  - `missingSinceSec` (int)
-- Example:
-  - `{ "target": "App", "missingSinceSec": 120 }`
-
-### Watchdog <-> App (Optional)
-- `ForceExit` (Watchdog -> App)
-  - Payload: `{ "reason": "agentRequest|hung" }`
+### Watchdog <-> App
+- IPC removed (no direct App messaging).
 
 ## 9. Sequences (Standard Flows)
 ### Update Apply

@@ -1,45 +1,36 @@
 using System;
-using System.IO;
-using System.IO.Pipes;
-using System.Text;
+using System.Net.Http;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using VeloUpdateSystem.Shared;
 
 namespace VeloUpdateSystem;
 
 public static class AgentIpcClient
 {
-    private const string AgentPipeName = "Moneybox.Agent";
+    private static readonly HttpClient Client = new()
+    {
+        BaseAddress = new Uri("http://127.0.0.1:51234/"),
+        Timeout = TimeSpan.FromSeconds(3)
+    };
 
     public static Task SendHeartbeatAsync(int pid, bool responsive, int idleMinutes, CancellationToken cancellationToken)
     {
         var payload = new { pid, responsive, idleMinutes };
-        var message = IpcEnvelope.Create(IpcMessageTypes.Heartbeat, "App", "Agent", payload);
-        return IpcClient.SendAsync(AgentPipeName, message, timeoutMs: 500, cancellationToken);
+        return Client.PostAsJsonAsync("heartbeat", payload, cancellationToken);
     }
 
-    public static async Task<IpcEnvelope?> GetStatusAsync(CancellationToken cancellationToken)
+    public static async Task<JsonElement?> GetStatusAsync(CancellationToken cancellationToken)
     {
-        var request = IpcEnvelope.Create(IpcMessageTypes.Status, "App", "Agent", new { want = "status" });
-        using var client = new NamedPipeClientStream(".", AgentPipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(1000);
-
-        await client.ConnectAsync(timeoutCts.Token).ConfigureAwait(false);
-        using var reader = new StreamReader(client, Encoding.UTF8, false, 4096, true);
-        using var writer = new StreamWriter(client, Encoding.UTF8, 4096, true) { AutoFlush = true };
-
-        var json = JsonSerializer.Serialize(request, IpcEnvelope.JsonOptions);
-        await writer.WriteLineAsync(json).ConfigureAwait(false);
-
-        var responseLine = await reader.ReadLineAsync().ConfigureAwait(false);
-        if (responseLine is null)
+        using var response = await Client.GetAsync("status", cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
         {
             return null;
         }
 
-        return JsonSerializer.Deserialize<IpcEnvelope>(responseLine, IpcEnvelope.JsonOptions);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return document.RootElement.Clone();
     }
 }

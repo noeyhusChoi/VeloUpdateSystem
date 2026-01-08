@@ -5,19 +5,14 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using VeloUpdateSystem.Shared;
 
 namespace Watchdog;
 
 public sealed class WatchdogService : BackgroundService
 {
-    private const string WatchdogPipeName = "Moneybox.Watchdog";
-    private const string AppPipeName = "Moneybox.Watchdog.App";
-
     private readonly WatchdogOptions _options;
     private readonly RestartLimiter _restartLimiter;
     private readonly ILogger<WatchdogService> _logger;
-    private readonly IpcServer _server;
     private DateTimeOffset _lastAgentStatus = DateTimeOffset.MinValue;
 
     public WatchdogService(
@@ -28,13 +23,11 @@ public sealed class WatchdogService : BackgroundService
         _options = options.Value;
         _restartLimiter = restartLimiter;
         _logger = logger;
-        _server = new IpcServer(WatchdogPipeName, HandleAgentMessageAsync);
     }
+
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _ = _server.RunAsync(stoppingToken);
-
         var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
@@ -50,33 +43,6 @@ public sealed class WatchdogService : BackgroundService
 
             await CheckAgentHeartbeatAsync().ConfigureAwait(false);
         }
-    }
-
-    private Task<IpcEnvelope?> HandleAgentMessageAsync(IpcEnvelope envelope)
-    {
-        if (envelope.Type == IpcMessageTypes.WatchdogStatus)
-        {
-            _lastAgentStatus = DateTimeOffset.UtcNow;
-        }
-        else if (envelope.Type == IpcMessageTypes.Restart)
-        {
-            var target = envelope.Payload.TryGetProperty("target", out var targetElement)
-                ? targetElement.GetString()
-                : "App";
-            var minDelaySec = envelope.Payload.TryGetProperty("minDelaySec", out var delayElement)
-                ? delayElement.GetInt32()
-                : 0;
-            _ = RestartProcessAsync(
-                target == "Agent" ? _options.AgentProcessName : _options.AppProcessName,
-                "agentRequest",
-                minDelaySec);
-        }
-        else if (envelope.Type == IpcMessageTypes.ProcessMissing)
-        {
-            _logger.LogWarning("Agent reported missing process: {Payload}", envelope.Payload.ToString());
-        }
-
-        return Task.FromResult<IpcEnvelope?>(null);
     }
 
     private async Task CheckAgentHeartbeatAsync()
@@ -129,17 +95,7 @@ public sealed class WatchdogService : BackgroundService
 
     private async Task NotifyAgentProcessMissingAsync(string processName)
     {
-        var payload = new { target = processName == _options.AgentProcessName ? "Agent" : "App", missingSinceSec = 0 };
-        var message = IpcEnvelope.Create(IpcMessageTypes.ProcessMissing, "Watchdog", "Agent", payload);
-        try
-        {
-            await IpcClient.SendAsync(WatchdogPipeName, message, timeoutMs: 500, cancellationToken: CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            // Agent might be down.
-        }
+        _logger.LogWarning("Process missing: {ProcessName}", processName);
     }
 
     private async Task NotifyAppForceExitAsync(string processName, string reason)
@@ -149,16 +105,6 @@ public sealed class WatchdogService : BackgroundService
             return;
         }
 
-        var payload = new { reason };
-        var message = IpcEnvelope.Create(IpcMessageTypes.ForceExit, "Watchdog", "App", payload);
-        try
-        {
-            await IpcClient.SendAsync(AppPipeName, message, timeoutMs: 500, cancellationToken: CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            // App might be down already.
-        }
+        _logger.LogWarning("Force exit requested: {Reason}", reason);
     }
 }

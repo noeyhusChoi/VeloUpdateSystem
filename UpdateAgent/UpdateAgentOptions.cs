@@ -11,5 +11,6 @@ public sealed class UpdateAgentOptions
     public int HeartbeatTimeoutSeconds { get; set; } = 30;
     public int IdleMinutesBeforeInstall { get; set; } = 10;
     public int GracefulExitTimeoutSeconds { get; set; } = 30;
+    public int HttpPort { get; set; } = 51234;
     public string AppProcessName { get; set; } = "VeloUpdateSystem";
 }

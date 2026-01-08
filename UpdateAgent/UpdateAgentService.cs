@@ -5,25 +5,22 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Velopack;
 using Velopack.Locators;
-using VeloUpdateSystem.Shared;
 
 namespace UpdateAgent;
 
 public sealed class UpdateAgentService : BackgroundService
 {
-    private const string AppPipeName = "Moneybox.Agent";
-    private const string WatchdogPipeName = "Moneybox.Watchdog";
-
     private readonly UpdateAgentOptions _options;
     private readonly AgentState _state;
     private readonly ILogger<UpdateAgentService> _logger;
-    private readonly IpcServer _appServer;
-    private readonly IpcServer _watchdogServer;
 
     public UpdateAgentService(
         IOptions<UpdateAgentOptions> options,
@@ -33,16 +30,14 @@ public sealed class UpdateAgentService : BackgroundService
         _options = options.Value;
         _state = state;
         _logger = logger;
-        _appServer = new IpcServer(AppPipeName, HandleAppMessageAsync);
-        _watchdogServer = new IpcServer(WatchdogPipeName, HandleWatchdogMessageAsync);
     }
+
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _state.SetChannel(_options.Channel);
 
-        _ = _appServer.RunAsync(stoppingToken);
-        _ = _watchdogServer.RunAsync(stoppingToken);
+        _ = Task.Run(() => RunHttpServerAsync(stoppingToken), stoppingToken);
         _ = Task.Run(() => WatchdogStatusLoopAsync(stoppingToken), stoppingToken);
 
         await RunUpdateCheckAsync(stoppingToken).ConfigureAwait(false);
@@ -52,6 +47,43 @@ public sealed class UpdateAgentService : BackgroundService
         {
             await RunUpdateCheckAsync(stoppingToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task RunHttpServerAsync(CancellationToken cancellationToken)
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = Array.Empty<string>(),
+            ContentRootPath = AppContext.BaseDirectory
+        });
+        builder.WebHost.UseUrls($"http://127.0.0.1:{_options.HttpPort}");
+        builder.Logging.ClearProviders();
+
+        var app = builder.Build();
+
+        app.MapGet("/status", () =>
+        {
+            var payload = BuildStatusPayload();
+            return Results.Json(payload);
+        });
+
+        app.MapPost("/heartbeat", async (HttpContext context) =>
+        {
+        var request = await JsonSerializer.DeserializeAsync<HeartbeatRequest>(
+            context.Request.Body,
+            JsonOptions,
+            cancellationToken).ConfigureAwait(false);
+
+            if (request is not null)
+            {
+                _state.UpdateHeartbeat(DateTimeOffset.UtcNow, request.IdleMinutes, request.Pid, request.Responsive);
+            }
+
+            return Results.Ok();
+        });
+
+        _logger.LogInformation("HTTP IPC listening on http://127.0.0.1:{Port}", _options.HttpPort);
+        await app.RunAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private UpdateManager CreateUpdateManager()
@@ -78,17 +110,10 @@ public sealed class UpdateAgentService : BackgroundService
             return windowsLocator;
         }
 
-        var dataRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Moneybox",
+        _logger.LogInformation(
+            "App not installed for PackId {PackId}. WindowsVelopackLocator has no current version.",
             _options.PackId);
-        var packagesRoot = Path.Combine(dataRoot, "packages");
-
-        Directory.CreateDirectory(packagesRoot);
-
-        _logger.LogWarning("App not installed. Using TestVelopackLocator at {Root}.", dataRoot);
-        _logger.LogInformation("Test version set to {Version}.", "0.0.0");
-        return new TestVelopackLocator(_options.PackId, "0.0.0", packagesRoot, null);
+        return windowsLocator;
     }
 
     private async Task RunUpdateCheckAsync(CancellationToken cancellationToken)
@@ -199,43 +224,10 @@ public sealed class UpdateAgentService : BackgroundService
         }
     }
 
-    private Task<IpcEnvelope?> HandleAppMessageAsync(IpcEnvelope envelope)
-    {
-        switch (envelope.Type)
-        {
-            case IpcMessageTypes.Status:
-                return Task.FromResult<IpcEnvelope?>(CreateStatusEnvelope(envelope));
-            case IpcMessageTypes.Heartbeat:
-                HandleHeartbeat(envelope.Payload);
-                return Task.FromResult<IpcEnvelope?>(null);
-            default:
-                return Task.FromResult<IpcEnvelope?>(null);
-        }
-    }
-
-    private Task<IpcEnvelope?> HandleWatchdogMessageAsync(IpcEnvelope envelope)
-    {
-        if (envelope.Type == IpcMessageTypes.ProcessMissing)
-        {
-            _logger.LogWarning("Watchdog reported missing process: {Payload}", envelope.Payload.ToString());
-        }
-
-        return Task.FromResult<IpcEnvelope?>(null);
-    }
-
-    private void HandleHeartbeat(JsonElement payload)
-    {
-        var pid = payload.TryGetProperty("pid", out var pidElement) ? pidElement.GetInt32() : (int?)null;
-        var responsive = payload.TryGetProperty("responsive", out var respElement) && respElement.GetBoolean();
-        var idleMinutes = payload.TryGetProperty("idleMinutes", out var idleElement) ? idleElement.GetInt32() : 0;
-
-        _state.UpdateHeartbeat(DateTimeOffset.UtcNow, idleMinutes, pid, responsive);
-    }
-
-    private IpcEnvelope CreateStatusEnvelope(IpcEnvelope request)
+    private object BuildStatusPayload()
     {
         var snapshot = _state.GetSnapshot();
-        var payload = new
+        return new
         {
             appId = _options.PackId,
             packId = _options.PackId,
@@ -247,34 +239,16 @@ public sealed class UpdateAgentService : BackgroundService
             hangDetected = snapshot.HangDetected,
             lastError = new { code = snapshot.LastErrorCode, message = snapshot.LastErrorMessage }
         };
-
-        return IpcEnvelope.Create(IpcMessageTypes.Status, "Agent", request.Source, payload, request.Id);
     }
 
     private async Task NotifyPrepareToExitAsync(string reason)
     {
-        var payload = new { reason, timeoutSec = _options.GracefulExitTimeoutSeconds };
-        var message = IpcEnvelope.Create(IpcMessageTypes.PrepareToExit, "Agent", "App", payload);
-
-        foreach (var client in _appServer.GetClients())
-        {
-            await client.SendAsync(message).ConfigureAwait(false);
-        }
+        _logger.LogInformation("PrepareToExit requested: {Reason}", reason);
     }
 
     private async Task NotifyWatchdogRestartAsync(string reason)
     {
-        var payload = new { target = "App", reason, minDelaySec = 5 };
-        var message = IpcEnvelope.Create(IpcMessageTypes.Restart, "Agent", "Watchdog", payload);
-        try
-        {
-            await IpcClient.SendAsync(WatchdogPipeName, message, timeoutMs: 500, cancellationToken: CancellationToken.None)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to send watchdog restart message.");
-        }
+        _logger.LogWarning("Watchdog restart requested but IPC is disabled. Reason={Reason}", reason);
     }
 
     private async Task WatchdogStatusLoopAsync(CancellationToken cancellationToken)
@@ -292,16 +266,15 @@ public sealed class UpdateAgentService : BackgroundService
                 hangDetected = _state.GetSnapshot().HangDetected
             };
 
-            var message = IpcEnvelope.Create(IpcMessageTypes.WatchdogStatus, "Agent", "Watchdog", payload);
-            try
-            {
-                await IpcClient.SendAsync(WatchdogPipeName, message, timeoutMs: 500, cancellationToken: cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                // Watchdog might not be running yet.
-            }
+            _logger.LogDebug("Watchdog status skipped. appPid={AppPid} agentPid={AgentPid}", payload.appPid, payload.agentPid);
         }
     }
+
+    private sealed record HeartbeatRequest(int Pid, bool Responsive, int IdleMinutes);
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
 }

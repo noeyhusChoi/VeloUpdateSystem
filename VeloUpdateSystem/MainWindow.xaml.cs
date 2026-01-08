@@ -9,6 +9,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+using System.Diagnostics;
 
 namespace VeloUpdateSystem
 {
@@ -82,9 +83,9 @@ namespace VeloUpdateSystem
                     idleMinutes: Math.Max(0, idleMinutes),
                     CancellationToken.None);
             }
-            catch
+            catch (Exception ex)
             {
-                // Agent may not be running.
+                Debug.WriteLine($"Heartbeat send failed: {ex}");
             }
         }
 
@@ -92,23 +93,23 @@ namespace VeloUpdateSystem
         {
             try
             {
-                var response = await AgentIpcClient.GetStatusAsync(CancellationToken.None);
-                if (response is null)
+                var payload = await AgentIpcClient.GetStatusAsync(CancellationToken.None);
+                if (payload is null)
                 {
                     AgentStatus = "Agent: offline";
                     return;
                 }
 
-                var payload = response.Payload;
-                var state = TryGetString(payload, "state") ?? "unknown";
-                var current = TryGetString(payload, "currentVersion");
-                var available = TryGetString(payload, "availableVersion");
-                var channel = TryGetString(payload, "channel");
+                var state = TryGetString(payload.Value, "state") ?? "unknown";
+                var current = TryGetString(payload.Value, "currentVersion");
+                var available = TryGetString(payload.Value, "availableVersion");
+                var channel = TryGetString(payload.Value, "channel");
 
                 AgentStatus = $"Agent: {state}, channel={channel ?? "n/a"}, current={current ?? "n/a"}, available={available ?? "n/a"}";
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine($"Status request failed: {ex}");
                 AgentStatus = "Agent: offline";
             }
         }

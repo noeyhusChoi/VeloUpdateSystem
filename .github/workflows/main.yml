@@ -87,7 +87,8 @@ jobs:
           --packDir publish `
           --outputDir artifacts `
           --channel ${{ steps.version.outputs.channel }} `
-          --mainExe VeloUpdateSystem.exe
+          --mainExe VeloUpdateSystem.exe `
+          --msiDeploymentTool
 
     # --------------------------------------------------------
     # 7. Upload artifacts

@@ -1,0 +1,17 @@
+[
+  {
+    "Name": "새 프로필",
+    "Projects": [
+      {
+        "Path": "UpdateAgent\\UpdateAgent.csproj",
+        "Action": "Start",
+        "DebugTarget": "UpdateAgent"
+      },
+      {
+        "Path": "VeloUpdateSystem\\VeloUpdateSystem.csproj",
+        "Action": "Start",
+        "DebugTarget": "VeloUpdateSystem"
+      }
+    ]
+  }
+]
