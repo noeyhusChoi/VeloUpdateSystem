@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Velopack;
+using Velopack.Locators;
 using VeloUpdateSystem.Shared;
 
 namespace UpdateAgent;
@@ -59,7 +61,34 @@ public sealed class UpdateAgentService : BackgroundService
             ExplicitChannel = _options.Channel
         };
 
-        return new UpdateManager(_options.UpdateUrl, options, locator: null);
+        var locator = CreateLocator();
+        _logger.LogInformation("Update source: {Url}, channel: {Channel}.", _options.UpdateUrl, _options.Channel);
+        _logger.LogInformation("Locator type: {LocatorType}.", locator.GetType().Name);
+        return new UpdateManager(_options.UpdateUrl, options, locator);
+    }
+
+    private Velopack.Locators.IVelopackLocator CreateLocator()
+    {
+        var windowsLocator = new WindowsVelopackLocator(_options.PackId, (uint)Environment.ProcessId, null);
+        if (windowsLocator.CurrentlyInstalledVersion != null)
+        {
+            _logger.LogInformation(
+                "Installed version detected: {Version}.",
+                windowsLocator.CurrentlyInstalledVersion.ToString());
+            return windowsLocator;
+        }
+
+        var dataRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Moneybox",
+            _options.PackId);
+        var packagesRoot = Path.Combine(dataRoot, "packages");
+
+        Directory.CreateDirectory(packagesRoot);
+
+        _logger.LogWarning("App not installed. Using TestVelopackLocator at {Root}.", dataRoot);
+        _logger.LogInformation("Test version set to {Version}.", "0.0.0");
+        return new TestVelopackLocator(_options.PackId, "0.0.0", packagesRoot, null);
     }
 
     private async Task RunUpdateCheckAsync(CancellationToken cancellationToken)
@@ -68,21 +97,26 @@ public sealed class UpdateAgentService : BackgroundService
         {
             _state.SetState("Checking");
             var manager = CreateUpdateManager();
-            _state.SetState("Checking", currentVersion: manager.CurrentVersion?.ToString());
+            var currentVersion = manager.CurrentVersion?.ToString();
+            _logger.LogInformation("Current version reported by UpdateManager: {Version}.", currentVersion ?? "unknown");
+            _state.SetState("Checking", currentVersion: currentVersion);
 
             var updateInfo = await manager.CheckForUpdatesAsync().ConfigureAwait(false);
             if (updateInfo is null)
             {
+                _logger.LogInformation("No updates available.");
                 _state.SetState("Idle", availableVersion: null);
                 return;
             }
 
             var target = updateInfo.TargetFullRelease?.Version?.ToString();
+            _logger.LogInformation("Update available: {Version}.", target ?? "unknown");
             _state.SetState("Downloading", availableVersion: target);
 
             await manager.DownloadUpdatesAsync(updateInfo, progress =>
             {
                 _state.UpdateProgress(progress);
+                _logger.LogDebug("Download progress: {Progress}%.", progress);
             }, cancellationToken).ConfigureAwait(false);
 
             _state.SetState("ReadyToInstall", availableVersion: target);
