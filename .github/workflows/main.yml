@@ -205,4 +205,8 @@ jobs:
           "
           set -e
           ln -sfn ${BASE}/${VERSION} ${BASE}/current
+          if [ \"${CHANNEL}\" = \"stable\" ]; then
+            ln -sfn ${BASE}/current/releases.stable.json ${BASE}/current/releases.json
+            ln -sfn ${BASE}/current/assets.stable.json ${BASE}/current/assets.json
+          fi
           "
