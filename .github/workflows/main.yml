@@ -101,9 +101,14 @@ jobs:
           exit 0
         }
 
-        $content = Get-Content -Path $releasesPath -Raw
-        $matches = [regex]::Matches($content, '[^"\\s]+\\.nupkg') | ForEach-Object { $_.Value } | Sort-Object -Unique
-        foreach ($pkg in $matches) {
+        $json = Get-Content -Path $releasesPath -Raw | ConvertFrom-Json
+        $assets = @()
+        if ($json.Assets) {
+          $assets = $json.Assets | Where-Object { $_.FileName -match '\.nupkg$' }
+        }
+
+        foreach ($asset in $assets) {
+          $pkg = $asset.FileName
           $pkgUrl = $seedUrl + $pkg
           $pkgPath = Join-Path $target $pkg
           Write-Host "Seeding $pkgUrl"
