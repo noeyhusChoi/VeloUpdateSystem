@@ -140,23 +140,34 @@ jobs:
           "echo SSH connection OK"
 
     # --------------------------------------------------------
-    # 4. Upload to server (staging)
+    # 4. Upload to server (versioned)
     # --------------------------------------------------------
-    - name: Upload to Azure (staging)
+    - name: Upload to Azure (versioned)
       run: |
         CHANNEL="${{ needs.build-app.outputs.channel }}"
+        VERSION="${{ needs.build-app.outputs.version }}"
+        BASE="/var/www/velopack/releases/app/${CHANNEL}"
+        VERSION_DIR="${BASE}/${VERSION}"
+
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "mkdir -p ${VERSION_DIR}"
 
         rsync -av \
           -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
           artifacts/ \
-          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/app/${CHANNEL}_staging/
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:${VERSION_DIR}/
 
     # --------------------------------------------------------
-    # 5. Atomic deploy (staging → live)
+    # 5. Update live pointer
     # --------------------------------------------------------
-    - name: Activate release
+    - name: Update live pointer
       run: |
         CHANNEL="${{ needs.build-app.outputs.channel }}"
+        VERSION="${{ needs.build-app.outputs.version }}"
+        BASE="/var/www/velopack/releases/app/${CHANNEL}"
 
         ssh \
           -o StrictHostKeyChecking=no \
@@ -164,8 +175,5 @@ jobs:
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
           "
           set -e
-          rm -rf /var/www/velopack/releases/app/${CHANNEL}_old || true
-          mv /var/www/velopack/releases/app/${CHANNEL} /var/www/velopack/releases/app/${CHANNEL}_old || true
-          mv /var/www/velopack/releases/app/${CHANNEL}_staging /var/www/velopack/releases/app/${CHANNEL}
-          rm -rf /var/www/velopack/releases/app/${CHANNEL}_old
+          ln -sfn ${BASE}/${VERSION} ${BASE}/current
           "
