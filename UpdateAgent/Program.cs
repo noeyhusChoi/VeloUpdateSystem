@@ -9,7 +9,7 @@ public static class Program
     public static void Main(string[] args)
     {
         Host.CreateDefaultBuilder(args)
-            .UseWindowsService()
+            .UseConsoleLifetime()
             .ConfigureServices((context, services) =>
             {
                 services.Configure<UpdateAgentOptions>(

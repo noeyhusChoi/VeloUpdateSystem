@@ -3,7 +3,9 @@ name: Velopack Build & Deploy
 on:
   push:
     tags:
-      - "v*"
+      - "app-v*"
+      - "agent-v*"
+      - "full-v*"
 
 permissions:
   contents: read
@@ -12,12 +14,14 @@ permissions:
 # Job 1: Build & Pack (Windows)
 # ============================================================
 jobs:
-  build-pack:
+  build-app:
     runs-on: windows-latest
+    if: startsWith(github.ref_name, 'app-v')
 
     outputs:
       version: ${{ steps.version.outputs.version }}
       channel: ${{ steps.version.outputs.channel }}
+      product: app
 
     steps:
     # --------------------------------------------------------
@@ -37,12 +41,12 @@ jobs:
       run: |
         $tag = "${{ github.ref_name }}"
 
-        if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+        if ($tag -notmatch '^app-v\d+\.\d+\.\d+(-beta\.\d+)?$') {
           Write-Error "Invalid tag format: $tag"
           exit 1
         }
 
-        $version = $tag.Substring(1)
+        $version = $tag.Substring(5)
         $channel = if ($version -match 'beta') { "beta" } else { "stable" }
 
         echo "version=$version" >> $env:GITHUB_OUTPUT
@@ -59,14 +63,14 @@ jobs:
     # --------------------------------------------------------
     # 4. Publish WPF
     # --------------------------------------------------------
-    - name: Publish WPF
+    - name: Publish App
       shell: pwsh
       run: |
         dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj `
           -c Release `
           -r win-x64 `
           --self-contained false `
-          -o publish
+          -o publish_app
 
     # --------------------------------------------------------
     # 5. Install Velopack CLI
@@ -84,8 +88,8 @@ jobs:
         vpk pack `
           --packId VeloUpdateSystem `
           --packVersion ${{ steps.version.outputs.version }} `
-          --packDir publish `
-          --outputDir artifacts `
+          --packDir publish_app `
+          --outputDir artifacts_app `
           --channel ${{ steps.version.outputs.channel }} `
           --mainExe VeloUpdateSystem.exe `
           --msiDeploymentTool
@@ -96,15 +100,199 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: velopack-artifacts
-        path: artifacts/
+        name: app-artifacts
+        path: artifacts_app/
 
 # ============================================================
-# Job 2: Deploy (Linux)
+# Job 2: Build & Pack Agent (Windows)
 # ============================================================
-  deploy:
+  build-agent:
+    runs-on: windows-latest
+    if: startsWith(github.ref_name, 'agent-v')
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      product: agent
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Extract version from tag
+      id: version
+      shell: pwsh
+      run: |
+        $tag = "${{ github.ref_name }}"
+
+        if ($tag -notmatch '^agent-v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+          Write-Error "Invalid tag format: $tag"
+          exit 1
+        }
+
+        $version = $tag.Substring(7)
+        $channel = if ($version -match 'beta') { "beta" } else { "stable" }
+
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "channel=$channel" >> $env:GITHUB_OUTPUT
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Publish Agent
+      shell: pwsh
+      run: |
+        dotnet publish UpdateAgent/UpdateAgent.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish_agent
+
+    - name: Install Velopack
+      shell: pwsh
+      run: dotnet tool install -g vpk
+
+    - name: Velopack pack
+      shell: pwsh
+      run: |
+        vpk pack `
+          --packId UpdateAgent `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish_agent `
+          --outputDir artifacts_agent `
+          --channel ${{ steps.version.outputs.channel }} `
+          --mainExe UpdateAgent.exe `
+          --msiDeploymentTool
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: agent-artifacts
+        path: artifacts_agent/
+
+# ============================================================
+# Job 3: Build Full Bundle (Windows)
+# ============================================================
+  build-full:
+    runs-on: windows-latest
+    if: startsWith(github.ref_name, 'full-v')
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      product: full
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Extract version from tag
+      id: version
+      shell: pwsh
+      run: |
+        $tag = "${{ github.ref_name }}"
+
+        if ($tag -notmatch '^full-v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+          Write-Error "Invalid tag format: $tag"
+          exit 1
+        }
+
+        $version = $tag.Substring(6)
+        $channel = if ($version -match 'beta') { "beta" } else { "stable" }
+
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "channel=$channel" >> $env:GITHUB_OUTPUT
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Publish App
+      shell: pwsh
+      run: |
+        dotnet publish VeloUpdateSystem/VeloUpdateSystem.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish_app
+
+    - name: Publish Agent
+      shell: pwsh
+      run: |
+        dotnet publish UpdateAgent/UpdateAgent.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish_agent
+
+    - name: Install Velopack
+      shell: pwsh
+      run: dotnet tool install -g vpk
+
+    - name: Pack App
+      shell: pwsh
+      run: |
+        vpk pack `
+          --packId VeloUpdateSystem `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish_app `
+          --outputDir artifacts_app `
+          --channel ${{ steps.version.outputs.channel }} `
+          --mainExe VeloUpdateSystem.exe
+
+    - name: Pack Agent
+      shell: pwsh
+      run: |
+        vpk pack `
+          --packId UpdateAgent `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish_agent `
+          --outputDir artifacts_agent `
+          --channel ${{ steps.version.outputs.channel }} `
+          --mainExe UpdateAgent.exe
+
+    - name: Build bootstrap bundle
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path bootstrap | Out-Null
+        Copy-Item artifacts_app\Setup.exe bootstrap\AppSetup.exe
+        Copy-Item artifacts_agent\Setup.exe bootstrap\AgentSetup.exe
+
+        @'
+param(
+    [switch]$Silent
+)
+
+$appArgs = @()
+$agentArgs = @()
+if ($Silent) {
+    $appArgs += "--silent"
+    $agentArgs += "--silent"
+}
+
+Start-Process -FilePath ".\\AppSetup.exe" -ArgumentList $appArgs -Wait
+Start-Process -FilePath ".\\AgentSetup.exe" -ArgumentList $agentArgs -Wait
+'@ | Out-File -FilePath bootstrap\install.ps1 -Encoding ASCII
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: full-artifacts
+        path: bootstrap/
+
+# ============================================================
+# Job 4: Deploy App (Linux)
+# ============================================================
+  deploy-app:
     runs-on: ubuntu-latest
-    needs: build-pack
+    needs: build-app
 
     steps:
     # --------------------------------------------------------
@@ -113,7 +301,7 @@ jobs:
     - name: Download artifacts
       uses: actions/download-artifact@v4
       with:
-        name: velopack-artifacts
+        name: app-artifacts
         path: artifacts
 
     # --------------------------------------------------------
@@ -141,19 +329,19 @@ jobs:
     # --------------------------------------------------------
     - name: Upload to Azure (staging)
       run: |
-        CHANNEL="${{ needs.build-pack.outputs.channel }}"
+        CHANNEL="${{ needs.build-app.outputs.channel }}"
 
         rsync -av \
           -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
           artifacts/ \
-          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/${CHANNEL}_staging/
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/app/${CHANNEL}_staging/
 
     # --------------------------------------------------------
     # 5. Atomic deploy (staging → live)
     # --------------------------------------------------------
     - name: Activate release
       run: |
-        CHANNEL="${{ needs.build-pack.outputs.channel }}"
+        CHANNEL="${{ needs.build-app.outputs.channel }}"
 
         ssh \
           -o StrictHostKeyChecking=no \
@@ -161,8 +349,114 @@ jobs:
           ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
           "
           set -e
-          rm -rf /var/www/velopack/releases/${CHANNEL}_old || true
-          mv /var/www/velopack/releases/${CHANNEL} /var/www/velopack/releases/${CHANNEL}_old || true
-          mv /var/www/velopack/releases/${CHANNEL}_staging /var/www/velopack/releases/${CHANNEL}
-          rm -rf /var/www/velopack/releases/${CHANNEL}_old
+          rm -rf /var/www/velopack/releases/app/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/app/${CHANNEL} /var/www/velopack/releases/app/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/app/${CHANNEL}_staging /var/www/velopack/releases/app/${CHANNEL}
+          rm -rf /var/www/velopack/releases/app/${CHANNEL}_old
+          "
+
+# ============================================================
+# Job 5: Deploy Agent (Linux)
+# ============================================================
+  deploy-agent:
+    runs-on: ubuntu-latest
+    needs: build-agent
+
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: agent-artifacts
+        path: artifacts
+
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+
+    - name: Test SSH connection
+      run: |
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "echo SSH connection OK"
+
+    - name: Upload to Azure (staging)
+      run: |
+        CHANNEL="${{ needs.build-agent.outputs.channel }}"
+
+        rsync -av \
+          -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
+          artifacts/ \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/agent/${CHANNEL}_staging/
+
+    - name: Activate release
+      run: |
+        CHANNEL="${{ needs.build-agent.outputs.channel }}"
+
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "
+          set -e
+          rm -rf /var/www/velopack/releases/agent/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/agent/${CHANNEL} /var/www/velopack/releases/agent/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/agent/${CHANNEL}_staging /var/www/velopack/releases/agent/${CHANNEL}
+          rm -rf /var/www/velopack/releases/agent/${CHANNEL}_old
+          "
+
+# ============================================================
+# Job 6: Deploy Full (Linux)
+# ============================================================
+  deploy-full:
+    runs-on: ubuntu-latest
+    needs: build-full
+
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: full-artifacts
+        path: artifacts
+
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+
+    - name: Test SSH connection
+      run: |
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "echo SSH connection OK"
+
+    - name: Upload to Azure (staging)
+      run: |
+        CHANNEL="${{ needs.build-full.outputs.channel }}"
+
+        rsync -av \
+          -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
+          artifacts/ \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:/var/www/velopack/releases/full/${CHANNEL}_staging/
+
+    - name: Activate release
+      run: |
+        CHANNEL="${{ needs.build-full.outputs.channel }}"
+
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "
+          set -e
+          rm -rf /var/www/velopack/releases/full/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/full/${CHANNEL} /var/www/velopack/releases/full/${CHANNEL}_old || true
+          mv /var/www/velopack/releases/full/${CHANNEL}_staging /var/www/velopack/releases/full/${CHANNEL}
+          rm -rf /var/www/velopack/releases/full/${CHANNEL}_old
           "
