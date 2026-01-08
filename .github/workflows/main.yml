@@ -110,6 +110,11 @@ jobs:
           Invoke-WebRequest -Uri $pkgUrl -OutFile $pkgPath -UseBasicParsing
         }
 
+        Write-Host "Seed contents:"
+        Get-ChildItem $target | Format-Table -AutoSize
+        Write-Host "Seed releases.json:"
+        Get-Content -Path $releasesPath
+
     - name: Velopack pack
       shell: pwsh
       run: |
