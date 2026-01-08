@@ -59,6 +59,23 @@ jobs:
         dotnet-version: 8.0.x
 
     # --------------------------------------------------------
+    # 3a. Cache dotnet tools and NuGet packages
+    # --------------------------------------------------------
+    - name: Cache dotnet tools
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\.dotnet\tools
+        key: dotnet-tools-${{ runner.os }}-v1
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\.nuget\packages
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', '**/packages.lock.json') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
+
+    # --------------------------------------------------------
     # 4. Publish WPF
     # --------------------------------------------------------
     - name: Publish App
