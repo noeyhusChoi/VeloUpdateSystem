@@ -10,6 +10,7 @@ using System.Windows.Navigation;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Diagnostics;
+using Velopack;
 
 namespace VeloUpdateSystem
 {
@@ -23,20 +24,44 @@ namespace VeloUpdateSystem
 
         private readonly DispatcherTimer _heartbeatTimer;
         private readonly DispatcherTimer _statusTimer;
+        private readonly DispatcherTimer _applyTimer;
+        private readonly AppSettings _settings;
+        private readonly WatchdogIpcClient _watchdogClient;
+        private readonly UpdateManager _updateManager;
+        private readonly SemaphoreSlim _updateGate = new(1, 1);
         private DateTimeOffset _lastInputUtc = DateTimeOffset.UtcNow;
-        private string _agentStatus = "Agent: unknown";
+        private string _watchdogStatus = "Watchdog: unknown";
+        private string _updateStatus = "Update: idle";
+        private UpdateInfo? _pendingUpdate;
+        private bool _updateDownloaded;
+        private bool _applyRequested;
+        private bool _updateInProgress;
+        private readonly CancellationTokenSource _updateLoopCts = new();
 
         public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
-        public string AgentStatus
+        public string WatchdogStatus
         {
-            get => _agentStatus;
+            get => _watchdogStatus;
             private set
             {
-                if (_agentStatus != value)
+                if (_watchdogStatus != value)
                 {
-                    _agentStatus = value;
-                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(AgentStatus)));
+                    _watchdogStatus = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(WatchdogStatus)));
+                }
+            }
+        }
+
+        public string UpdateStatus
+        {
+            get => _updateStatus;
+            private set
+            {
+                if (_updateStatus != value)
+                {
+                    _updateStatus = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(UpdateStatus)));
                 }
             }
         }
@@ -46,6 +71,12 @@ namespace VeloUpdateSystem
             DataContext = this;
             InitializeComponent();
             HookInputTracking();
+
+            _settings = AppSettings.Load();
+            _watchdogClient = new WatchdogIpcClient(_settings.WatchdogBaseUri);
+            _updateManager = new UpdateManager(
+                _settings.UpdateUrl,
+                new UpdateOptions { ExplicitChannel = _settings.Channel });
 
             _heartbeatTimer = new DispatcherTimer
             {
@@ -60,6 +91,15 @@ namespace VeloUpdateSystem
             };
             _statusTimer.Tick += async (_, _) => await UpdateStatusAsync();
             _statusTimer.Start();
+
+            _applyTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(5)
+            };
+            _applyTimer.Tick += async (_, _) => await TryApplyUpdateAsync("idleCheck");
+            _applyTimer.Start();
+
+            _ = Task.Run(() => RunUpdateLoopAsync(_updateLoopCts.Token));
         }
 
         private void HookInputTracking()
@@ -76,11 +116,11 @@ namespace VeloUpdateSystem
         {
             try
             {
-                var idleMinutes = (int)Math.Floor((DateTimeOffset.UtcNow - _lastInputUtc).TotalMinutes);
-                await AgentIpcClient.SendHeartbeatAsync(
+                var idleSeconds = (int)Math.Floor((DateTimeOffset.UtcNow - _lastInputUtc).TotalSeconds);
+                await _watchdogClient.SendHeartbeatAsync(
                     Environment.ProcessId,
                     responsive: true,
-                    idleMinutes: Math.Max(0, idleMinutes),
+                    idleSeconds: Math.Max(0, idleSeconds),
                     CancellationToken.None);
             }
             catch (Exception ex)
@@ -93,30 +133,155 @@ namespace VeloUpdateSystem
         {
             try
             {
-                var payload = await AgentIpcClient.GetStatusAsync(CancellationToken.None);
+                var payload = await _watchdogClient.GetStatusAsync(CancellationToken.None);
                 if (payload is null)
                 {
-                    AgentStatus = "Agent: offline";
+                    WatchdogStatus = "Watchdog: offline";
                     return;
                 }
 
-                var state = TryGetString(payload.Value, "state") ?? "unknown";
-                var current = TryGetString(payload.Value, "currentVersion");
-                var available = TryGetString(payload.Value, "availableVersion");
-                var channel = TryGetString(payload.Value, "channel");
-
-                AgentStatus = $"Agent: {state}, channel={channel ?? "n/a"}, current={current ?? "n/a"}, available={available ?? "n/a"}";
+                var running = TryGetString(payload.Value, "appRunning");
+                var suppressed = TryGetString(payload.Value, "updateSuppressed");
+                WatchdogStatus = $"Watchdog: appRunning={running ?? "n/a"}, updateSuppressed={suppressed ?? "n/a"}";
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Status request failed: {ex}");
-                AgentStatus = "Agent: offline";
+                WatchdogStatus = "Watchdog: offline";
             }
         }
 
         private static string? TryGetString(System.Text.Json.JsonElement payload, string name)
         {
-            return payload.TryGetProperty(name, out var element) ? element.GetString() : null;
+            if (!payload.TryGetProperty(name, out var element))
+            {
+                return null;
+            }
+
+            return element.ValueKind == System.Text.Json.JsonValueKind.String
+                ? element.GetString()
+                : element.ToString();
+        }
+
+        private async Task RunUpdateLoopAsync(CancellationToken cancellationToken)
+        {
+            await CheckForUpdatesAsync(cancellationToken).ConfigureAwait(false);
+
+            var interval = TimeSpan.FromMinutes(_settings.PollIntervalMinutes);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                    await CheckForUpdatesAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (TaskCanceledException)
+                {
+                    return;
+                }
+            }
+        }
+
+        private async Task CheckForUpdatesAsync(CancellationToken cancellationToken)
+        {
+            await _updateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                SetUpdateStatus("Update: checking");
+                var updateInfo = await _updateManager.CheckForUpdatesAsync().ConfigureAwait(false);
+                if (updateInfo is null)
+                {
+                    _pendingUpdate = null;
+                    _updateDownloaded = false;
+                    SetUpdateStatus("Update: idle");
+                    return;
+                }
+
+                _pendingUpdate = updateInfo;
+                SetUpdateStatus($"Update: downloading {updateInfo.TargetFullRelease?.Version}");
+                await _updateManager.DownloadUpdatesAsync(updateInfo, progress =>
+                {
+                    SetUpdateStatus($"Update: downloading {progress}%");
+                }, cancellationToken).ConfigureAwait(false);
+
+                _updateDownloaded = true;
+                SetUpdateStatus($"Update: ready {updateInfo.TargetFullRelease?.Version}");
+            }
+            catch (Velopack.Exceptions.NotInstalledException)
+            {
+                _pendingUpdate = null;
+                _updateDownloaded = false;
+                SetUpdateStatus("Update: not installed");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Update check failed: {ex}");
+                SetUpdateStatus("Update: error");
+            }
+            finally
+            {
+                _updateGate.Release();
+            }
+
+            await TryApplyUpdateAsync("downloadComplete").ConfigureAwait(false);
+        }
+
+        private async Task TryApplyUpdateAsync(string reason)
+        {
+            if (_updateInProgress || !_updateDownloaded || _pendingUpdate is null)
+            {
+                return;
+            }
+
+            var idleRequired = TimeSpan.FromSeconds(_settings.IdleSecondsBeforeApply);
+            if (!_applyRequested && !IsIdleFor(idleRequired))
+            {
+                SetUpdateStatus($"Update: waiting for idle {idleRequired.TotalSeconds:0}s");
+                return;
+            }
+
+            _applyRequested = false;
+            _updateInProgress = true;
+            SetUpdateStatus($"Update: applying ({reason})");
+
+            try
+            {
+                await _watchdogClient.SetUpdateModeAsync(true, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Watchdog update start failed: {ex}");
+            }
+
+            _updateManager.ApplyUpdatesAndRestart(_pendingUpdate, Array.Empty<string>());
+        }
+
+        private bool IsIdleFor(TimeSpan duration)
+        {
+            return DateTimeOffset.UtcNow - _lastInputUtc >= duration;
+        }
+
+        private void SetUpdateStatus(string value)
+        {
+            if (Dispatcher.CheckAccess())
+            {
+                UpdateStatus = value;
+                return;
+            }
+
+            Dispatcher.Invoke(() => UpdateStatus = value);
+        }
+
+        private async void OnIdleApplyClick(object sender, RoutedEventArgs e)
+        {
+            _applyRequested = true;
+            await TryApplyUpdateAsync("manual").ConfigureAwait(false);
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _updateLoopCts.Cancel();
+            base.OnClosed(e);
         }
     }
 }

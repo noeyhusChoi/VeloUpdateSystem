@@ -17,4 +17,10 @@
     <PackageReference Include="MinVer" Version="4.3.0" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

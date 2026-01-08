@@ -1,5 +1,4 @@
 <Solution>
   <Project Path="VeloUpdateSystem/VeloUpdateSystem.csproj" />
-  <Project Path="UpdateAgent/UpdateAgent.csproj" />
   <Project Path="Watchdog/Watchdog.csproj" />
 </Solution>

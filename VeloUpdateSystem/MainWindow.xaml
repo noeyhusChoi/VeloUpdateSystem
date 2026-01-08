@@ -10,14 +10,25 @@
     Height="450"
     mc:Ignorable="d">
     <Grid>
-        <TextBlock
-            Margin="12,12,12,0"
-            HorizontalAlignment="Left"
-            VerticalAlignment="Top"
-            FontSize="12"
-            Foreground="Black"
-            Opacity="0.7"
-            Text="{Binding AgentStatus}" />
+        <StackPanel Margin="12,12,12,12" VerticalAlignment="Top">
+            <TextBlock
+                FontSize="12"
+                Foreground="Black"
+                Opacity="0.7"
+                Text="{Binding WatchdogStatus}" />
+            <TextBlock
+                Margin="0,6,0,0"
+                FontSize="12"
+                Foreground="Black"
+                Opacity="0.7"
+                Text="{Binding UpdateStatus}" />
+            <Button
+                Margin="0,12,0,0"
+                Width="160"
+                Height="28"
+                Content="Idle 적용 실행"
+                Click="OnIdleApplyClick" />
+        </StackPanel>
         <TextBlock
             Margin="0,0,12,8"
             HorizontalAlignment="Right"
