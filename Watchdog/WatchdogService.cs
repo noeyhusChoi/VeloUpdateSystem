@@ -1,11 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,62 +14,70 @@ namespace Watchdog;
 public sealed class WatchdogService : BackgroundService
 {
     private readonly WatchdogOptions _options;
-    private readonly RestartLimiter _restartLimiter;
+    private readonly Dictionary<string, RestartLimiter> _restartLimiters = new();
     private readonly ILogger<WatchdogService> _logger;
-    private DateTimeOffset _lastHeartbeatUtc = DateTimeOffset.MinValue;
-    private int? _lastHeartbeatPid;
-    private bool _lastHeartbeatResponsive;
-    private int _lastHeartbeatIdleSeconds;
-    private DateTimeOffset _updateSuppressUntilUtc = DateTimeOffset.MinValue;
 
     public WatchdogService(
         IOptions<WatchdogOptions> options,
-        RestartLimiter restartLimiter,
         ILogger<WatchdogService> logger)
     {
         _options = options.Value;
-        _restartLimiter = restartLimiter;
         _logger = logger;
     }
 
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _ = Task.Run(() => RunHttpServerAsync(stoppingToken), stoppingToken);
+        foreach (var target in _options.Targets)
+        {
+            _logger.LogInformation(
+                "Watchdog target registered: Name={Name} ExePath={ExePath}",
+                target.Name,
+                target.GetExePath());
+        }
 
         var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
-            if (!IsUpdateSuppressed() && !IsProcessRunning(_options.AppProcessName))
+            foreach (var target in _options.Targets)
             {
-                await RestartProcessAsync(_options.AppProcessName, "crash", minDelaySec: 0).ConfigureAwait(false);
+                await CheckTargetAsync(target).ConfigureAwait(false);
             }
-
-            await CheckAppHeartbeatAsync().ConfigureAwait(false);
-
-            _logger.LogDebug(
-                "Watchdog tick: appRunning={AppRunning} lastHeartbeatUtc={HeartbeatUtc} updateSuppressed={Suppressed}",
-                IsProcessRunning(_options.AppProcessName),
-                _lastHeartbeatUtc == DateTimeOffset.MinValue ? null : _lastHeartbeatUtc,
-                IsUpdateSuppressed());
         }
     }
 
-    private async Task CheckAppHeartbeatAsync()
+    private async Task CheckTargetAsync(WatchdogTarget target)
     {
-        if (_lastHeartbeatUtc == DateTimeOffset.MinValue)
+        var processName = target.Name;
+        var updateLockPath = target.GetUpdateLockPath();
+        var heartbeatPath = target.GetHeartbeatPath();
+        var updateSuppressed = IsUpdateSuppressed(updateLockPath, out var suppressionReason);
+
+        if (!updateSuppressed && !IsProcessRunning(processName))
         {
-            return;
+            await RestartProcessAsync(target, "crash", minDelaySec: 0).ConfigureAwait(false);
         }
 
-        var timeout = TimeSpan.FromSeconds(_options.HeartbeatTimeoutSeconds);
-        if (DateTimeOffset.UtcNow - _lastHeartbeatUtc > timeout)
+        var heartbeat = ReadHeartbeat(heartbeatPath);
+        if (heartbeat is not null)
         {
-            if (!IsUpdateSuppressed())
+            var timeout = TimeSpan.FromSeconds(_options.HeartbeatTimeoutSeconds);
+            if (!updateSuppressed && DateTimeOffset.UtcNow - heartbeat.TimestampUtc > timeout)
             {
-                await RestartProcessAsync(_options.AppProcessName, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
+                await RestartProcessAsync(target, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
             }
         }
+
+        var heartbeatAgeSec = heartbeat is null
+            ? (double?)null
+            : (DateTimeOffset.UtcNow - heartbeat.TimestampUtc).TotalSeconds;
+        _logger.LogInformation(
+            "Watchdog tick: target={Target} running={Running} heartbeatAgeSec={HeartbeatAgeSec} suppressed={Suppressed} reason={Reason}",
+            processName,
+            IsProcessRunning(processName),
+            heartbeatAgeSec,
+            updateSuppressed,
+            suppressionReason ?? "none");
     }
 
     private static bool IsProcessRunning(string processName)
@@ -85,18 +92,14 @@ public sealed class WatchdogService : BackgroundService
         }
     }
 
-    private async Task RestartProcessAsync(string processName, string reason, int minDelaySec)
+    private async Task RestartProcessAsync(WatchdogTarget target, string reason, int minDelaySec)
     {
-        if (IsUpdateSuppressed())
-        {
-            _logger.LogWarning("Restart suppressed during update. Process={ProcessName} Reason={Reason}", processName, reason);
-            return;
-        }
-
+        var processName = target.Name;
         var now = DateTimeOffset.UtcNow;
         var window = TimeSpan.FromMinutes(_options.RestartWindowMinutes);
 
-        if (!_restartLimiter.TryRegisterRestart(now, window, _options.MaxRestartsInWindow))
+        var limiter = GetLimiter(processName);
+        if (!limiter.TryRegisterRestart(now, window, _options.MaxRestartsInWindow))
         {
             _logger.LogWarning("Restart backoff active for {ProcessName}.", processName);
             await Task.Delay(TimeSpan.FromMinutes(_options.BackoffMinutes)).ConfigureAwait(false);
@@ -109,106 +112,101 @@ public sealed class WatchdogService : BackgroundService
         }
 
         _logger.LogWarning("Restarting {ProcessName} due to {Reason}.", processName, reason);
-        await NotifyAppForceExitAsync(processName, reason).ConfigureAwait(false);
+        StartProcess(target);
     }
 
-    private async Task NotifyAppForceExitAsync(string processName, string reason)
+    private void StartProcess(WatchdogTarget target)
     {
-        if (processName != _options.AppProcessName)
+        var exePath = target.GetExePath();
+        var workingDir = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory;
+        var args = target.Arguments ?? string.Empty;
+
+        try
         {
-            return;
+            Directory.CreateDirectory(Path.Combine(workingDir, "watchdog"));
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = args,
+                WorkingDirectory = workingDir,
+                UseShellExecute = true
+            });
+            _logger.LogInformation("Process started: {Name} ({Path})", target.Name, exePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start process {Name} at {Path}", target.Name, exePath);
+        }
+    }
+
+    private RestartLimiter GetLimiter(string name)
+    {
+        if (!_restartLimiters.TryGetValue(name, out var limiter))
+        {
+            limiter = new RestartLimiter();
+            _restartLimiters[name] = limiter;
         }
 
-        _logger.LogWarning("Force exit requested: {Reason}", reason);
+        return limiter;
     }
 
-    private async Task RunHttpServerAsync(CancellationToken cancellationToken)
+    private bool IsUpdateSuppressed(string updateLockPath, out string? reason)
     {
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
-        {
-            Args = Array.Empty<string>(),
-            ContentRootPath = AppContext.BaseDirectory
-        });
-        builder.WebHost.UseUrls($"http://127.0.0.1:{_options.HttpPort}");
-        builder.Logging.ClearProviders();
-
-        var app = builder.Build();
-
-        app.MapPost("/heartbeat", async (HttpContext context) =>
-        {
-            var request = await JsonSerializer.DeserializeAsync<HeartbeatRequest>(
-                context.Request.Body,
-                JsonOptions,
-                cancellationToken).ConfigureAwait(false);
-
-            if (request is not null)
-            {
-                _lastHeartbeatUtc = DateTimeOffset.UtcNow;
-                _lastHeartbeatPid = request.Pid;
-                _lastHeartbeatResponsive = request.Responsive;
-                _lastHeartbeatIdleSeconds = request.IdleSeconds;
-                _logger.LogInformation(
-                    "Heartbeat received: pid={Pid} responsive={Responsive} idleSeconds={IdleSeconds}",
-                    _lastHeartbeatPid,
-                    _lastHeartbeatResponsive,
-                    _lastHeartbeatIdleSeconds);
-            }
-
-            return Results.Ok();
-        });
-
-        app.MapPost("/update/start", () =>
-        {
-            _updateSuppressUntilUtc = DateTimeOffset.UtcNow.AddMinutes(_options.UpdateSuppressionMinutes);
-            _logger.LogWarning(
-                "Update suppression enabled until {UntilUtc}.",
-                _updateSuppressUntilUtc);
-            return Results.Ok();
-        });
-
-        app.MapPost("/update/end", () =>
-        {
-            _updateSuppressUntilUtc = DateTimeOffset.MinValue;
-            _logger.LogWarning("Update suppression cleared.");
-            return Results.Ok();
-        });
-
-        app.MapGet("/status", () =>
-        {
-            var payload = new
-            {
-                appProcess = _options.AppProcessName,
-                appRunning = IsProcessRunning(_options.AppProcessName),
-                lastHeartbeatUtc = _lastHeartbeatUtc == DateTimeOffset.MinValue ? (DateTimeOffset?)null : _lastHeartbeatUtc,
-                lastHeartbeatPid = _lastHeartbeatPid,
-                lastHeartbeatResponsive = _lastHeartbeatResponsive,
-                lastHeartbeatIdleSeconds = _lastHeartbeatIdleSeconds,
-                updateSuppressed = IsUpdateSuppressed()
-            };
-            return Results.Json(payload);
-        });
-
-        _logger.LogInformation("HTTP IPC listening on http://127.0.0.1:{Port}", _options.HttpPort);
-        await app.RunAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private bool IsUpdateSuppressed()
-    {
-        if (_updateSuppressUntilUtc == DateTimeOffset.MinValue)
+        reason = null;
+        if (!File.Exists(updateLockPath))
         {
             return false;
         }
 
-        if (DateTimeOffset.UtcNow <= _updateSuppressUntilUtc)
+        try
+        {
+            var payload = File.ReadAllText(updateLockPath);
+            var info = JsonSerializer.Deserialize<UpdateLockInfo>(payload, JsonOptions);
+            if (info is null)
+            {
+                return true;
+            }
+
+            reason = info.Reason;
+            if (info.ExpiresAtUtc == DateTimeOffset.MinValue)
+            {
+                return true;
+            }
+
+            if (DateTimeOffset.UtcNow <= info.ExpiresAtUtc)
+            {
+                return true;
+            }
+
+            File.Delete(updateLockPath);
+            return false;
+        }
+        catch
         {
             return true;
         }
-
-        _updateSuppressUntilUtc = DateTimeOffset.MinValue;
-        return false;
     }
 
-    private sealed record HeartbeatRequest(int Pid, bool Responsive, int IdleSeconds);
+    private static HeartbeatInfo? ReadHeartbeat(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var payload = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<HeartbeatInfo>(payload, JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private sealed record HeartbeatInfo(DateTimeOffset TimestampUtc, int Pid, bool Responsive, int IdleSeconds);
+    private sealed record UpdateLockInfo(DateTimeOffset ExpiresAtUtc, string? Reason);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

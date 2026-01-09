@@ -14,7 +14,6 @@ public static class Program
             {
                 services.Configure<WatchdogOptions>(
                     context.Configuration.GetSection(WatchdogOptions.SectionName));
-                services.AddSingleton<RestartLimiter>();
                 services.AddHostedService<WatchdogService>();
             })
             .ConfigureLogging(logging =>

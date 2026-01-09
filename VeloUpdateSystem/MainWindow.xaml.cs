@@ -23,10 +23,9 @@ namespace VeloUpdateSystem
             $"v{AppVersionProvider.GetVersion()}";
 
         private readonly DispatcherTimer _heartbeatTimer;
-        private readonly DispatcherTimer _statusTimer;
         private readonly DispatcherTimer _applyTimer;
         private readonly AppSettings _settings;
-        private readonly WatchdogIpcClient _watchdogClient;
+        private readonly WatchdogFileStore _watchdogStore;
         private readonly UpdateManager _updateManager;
         private readonly SemaphoreSlim _updateGate = new(1, 1);
         private DateTimeOffset _lastInputUtc = DateTimeOffset.UtcNow;
@@ -115,11 +114,13 @@ namespace VeloUpdateSystem
             HookInputTracking();
 
             _settings = AppSettings.Load();
-            _watchdogClient = new WatchdogIpcClient(_settings.WatchdogBaseUri);
+            _watchdogStore = new WatchdogFileStore(Process.GetCurrentProcess().ProcessName);
             _updateManager = new UpdateManager(
                 _settings.GetUpdateUrl(),
                 new UpdateOptions { ExplicitChannel = _settings.Channel });
             CurrentVersionDisplay = $"Current: {_updateManager.CurrentVersion?.ToString() ?? AppVersionProvider.GetVersion()}";
+
+            _watchdogStore.ClearExpiredUpdateLock();
 
             _heartbeatTimer = new DispatcherTimer
             {
@@ -127,13 +128,6 @@ namespace VeloUpdateSystem
             };
             _heartbeatTimer.Tick += async (_, _) => await SendHeartbeatAsync();
             _heartbeatTimer.Start();
-
-            _statusTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromSeconds(10)
-            };
-            _statusTimer.Tick += async (_, _) => await UpdateStatusAsync();
-            _statusTimer.Start();
 
             _applyTimer = new DispatcherTimer
             {
@@ -160,50 +154,17 @@ namespace VeloUpdateSystem
             try
             {
                 var idleSeconds = (int)Math.Floor((DateTimeOffset.UtcNow - _lastInputUtc).TotalSeconds);
-                await _watchdogClient.SendHeartbeatAsync(
+                _watchdogStore.WriteHeartbeat(
                     Environment.ProcessId,
                     responsive: true,
-                    idleSeconds: Math.Max(0, idleSeconds),
-                    CancellationToken.None);
+                    idleSeconds: Math.Max(0, idleSeconds));
+                WatchdogStatus = "Watchdog: heartbeat ok";
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Heartbeat send failed: {ex}");
+                WatchdogStatus = "Watchdog: heartbeat failed";
             }
-        }
-
-        private async Task UpdateStatusAsync()
-        {
-            try
-            {
-                var payload = await _watchdogClient.GetStatusAsync(CancellationToken.None);
-                if (payload is null)
-                {
-                    WatchdogStatus = "Watchdog: offline";
-                    return;
-                }
-
-                var running = TryGetString(payload.Value, "appRunning");
-                var suppressed = TryGetString(payload.Value, "updateSuppressed");
-                WatchdogStatus = $"Watchdog: appRunning={running ?? "n/a"}, updateSuppressed={suppressed ?? "n/a"}";
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"Status request failed: {ex}");
-                WatchdogStatus = "Watchdog: offline";
-            }
-        }
-
-        private static string? TryGetString(System.Text.Json.JsonElement payload, string name)
-        {
-            if (!payload.TryGetProperty(name, out var element))
-            {
-                return null;
-            }
-
-            return element.ValueKind == System.Text.Json.JsonValueKind.String
-                ? element.GetString()
-                : element.ToString();
         }
 
         private async Task RunUpdateLoopAsync(CancellationToken cancellationToken)
@@ -297,11 +258,11 @@ namespace VeloUpdateSystem
 
             try
             {
-                await _watchdogClient.SetUpdateModeAsync(true, CancellationToken.None);
+                _watchdogStore.WriteUpdateLock(TimeSpan.FromMinutes(_settings.UpdateLockTtlMinutes), "update");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Watchdog update start failed: {ex}");
+                Debug.WriteLine($"Update lock write failed: {ex}");
             }
 
             _updateManager.ApplyUpdatesAndRestart(_pendingUpdate, Array.Empty<string>());

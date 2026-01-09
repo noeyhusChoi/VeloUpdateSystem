@@ -10,9 +10,7 @@ public sealed class AppSettings
     public string Channel { get; init; } = "stable";
     public int PollIntervalMinutes { get; init; } = 60;
     public int IdleSecondsBeforeApply { get; init; } = 60;
-    public int WatchdogPort { get; init; } = 51235;
-
-    public Uri WatchdogBaseUri => new($"http://127.0.0.1:{WatchdogPort}/");
+    public int UpdateLockTtlMinutes { get; init; } = 30;
 
     public static AppSettings Load()
     {
@@ -37,7 +35,7 @@ public sealed class AppSettings
                 Channel = GetString(app, "Channel") ?? "stable",
                 PollIntervalMinutes = GetInt(app, "PollIntervalMinutes", 60),
                 IdleSecondsBeforeApply = GetInt(app, "IdleSecondsBeforeApply", 60),
-                WatchdogPort = GetInt(app, "WatchdogPort", 51235)
+                UpdateLockTtlMinutes = GetInt(app, "UpdateLockTtlMinutes", 30)
             };
         }
         catch
