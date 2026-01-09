@@ -153,11 +153,7 @@ namespace VeloUpdateSystem
         {
             try
             {
-                var idleSeconds = (int)Math.Floor((DateTimeOffset.UtcNow - _lastInputUtc).TotalSeconds);
-                _watchdogStore.WriteHeartbeat(
-                    Environment.ProcessId,
-                    responsive: true,
-                    idleSeconds: Math.Max(0, idleSeconds));
+                _watchdogStore.WriteHeartbeat(Environment.ProcessId);
                 WatchdogStatus = "Watchdog: heartbeat ok";
             }
             catch (Exception ex)

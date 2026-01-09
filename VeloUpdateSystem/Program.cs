@@ -12,6 +12,12 @@ namespace VeloUpdateSystem
                 .SetArgs(args)
                 .Run();
 
+            if (WatchdogBootstrap.ShouldRunInstallTasks(args))
+            {
+                WatchdogBootstrap.EnsureInstalled();
+                return;
+            }
+
             var app = new App();
             app.InitializeComponent();
             app.Run();

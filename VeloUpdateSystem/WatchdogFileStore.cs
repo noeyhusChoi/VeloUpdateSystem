@@ -19,10 +19,10 @@ public sealed class WatchdogFileStore
         _updateLockPath = Path.Combine(_watchdogDir, "update.lock.json");
     }
 
-    public void WriteHeartbeat(int pid, bool responsive, int idleSeconds)
+    public void WriteHeartbeat(int pid)
     {
         Directory.CreateDirectory(_watchdogDir);
-        var payload = new HeartbeatInfo(DateTimeOffset.UtcNow, pid, responsive, idleSeconds);
+        var payload = new HeartbeatInfo(DateTimeOffset.UtcNow, pid);
         WriteJsonAtomic(_heartbeatPath, payload);
     }
 
@@ -71,7 +71,7 @@ public sealed class WatchdogFileStore
         File.Delete(tempPath);
     }
 
-    private sealed record HeartbeatInfo(DateTimeOffset TimestampUtc, int Pid, bool Responsive, int IdleSeconds);
+    private sealed record HeartbeatInfo(DateTimeOffset TimestampUtc, int Pid);
     private sealed record UpdateLockInfo(DateTimeOffset StartedAtUtc, DateTimeOffset ExpiresAtUtc, string Reason);
 
     private static readonly JsonSerializerOptions JsonOptions = new()

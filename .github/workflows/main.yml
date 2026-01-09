@@ -87,6 +87,22 @@ jobs:
           --self-contained false `
           -o publish_app
 
+    - name: Publish Watchdog
+      shell: pwsh
+      run: |
+        dotnet publish Watchdog/Watchdog.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish_watchdog
+
+    - name: Bundle Watchdog into app package
+      shell: pwsh
+      run: |
+        $target = Join-Path "publish_app" "Watchdog"
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        Copy-Item -Path "publish_watchdog\\*" -Destination $target -Recurse -Force
+
 
     # --------------------------------------------------------
     # 5. Install Velopack CLI

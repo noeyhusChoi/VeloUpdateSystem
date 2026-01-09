@@ -9,6 +9,8 @@ public sealed class WatchdogTarget
     public string ExePath { get; set; } = string.Empty;
     public string? PackId { get; set; }
     public string? ExeName { get; set; }
+    public string? InstallScope { get; set; }
+    public string? InstallRoot { get; set; }
     public string? Arguments { get; set; }
     public string? HeartbeatFile { get; set; }
     public string? UpdateLockFile { get; set; }
@@ -17,11 +19,9 @@ public sealed class WatchdogTarget
     {
         if (string.IsNullOrWhiteSpace(ExePath) && !string.IsNullOrWhiteSpace(PackId))
         {
-            var localRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                PackId);
+            var root = ResolveInstallRoot();
             var exeName = string.IsNullOrWhiteSpace(ExeName) ? $"{PackId}.exe" : ExeName;
-            return Path.Combine(localRoot, "current", exeName);
+            return Path.Combine(root, "current", exeName);
         }
 
         if (!string.IsNullOrWhiteSpace(ExePath))
@@ -41,6 +41,37 @@ public sealed class WatchdogTarget
         }
 
         return Path.Combine(AppContext.BaseDirectory, ExePath);
+    }
+
+    private string ResolveInstallRoot()
+    {
+        if (!string.IsNullOrWhiteSpace(InstallRoot))
+        {
+            var expanded = Environment.ExpandEnvironmentVariables(InstallRoot);
+            return Path.IsPathRooted(expanded)
+                ? expanded
+                : Path.Combine(AppContext.BaseDirectory, expanded);
+        }
+
+        var scope = (InstallScope ?? "User").Trim().ToLowerInvariant();
+        var baseDir = scope switch
+        {
+            "system" => Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            _ => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+        };
+
+        return Path.Combine(baseDir, PackId ?? string.Empty);
+    }
+
+    public string GetProcessName()
+    {
+        if (!string.IsNullOrWhiteSpace(Name))
+        {
+            return Name;
+        }
+
+        var exePath = GetExePath();
+        return Path.GetFileNameWithoutExtension(exePath);
     }
 
     public string GetHeartbeatPath()

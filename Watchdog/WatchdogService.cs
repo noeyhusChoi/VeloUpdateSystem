@@ -1,33 +1,24 @@
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Watchdog;
 
-public sealed class WatchdogService : BackgroundService
+public sealed class WatchdogService(
+    IOptions<WatchdogOptions> options,
+    RestartPolicy restartPolicy,
+    ProcessController processController,
+    ILogger<WatchdogService> logger)
+    : BackgroundService
 {
-    private readonly WatchdogOptions _options;
-    private readonly Dictionary<string, RestartLimiter> _restartLimiters = new();
-    private readonly ILogger<WatchdogService> _logger;
-
-    public WatchdogService(
-        IOptions<WatchdogOptions> options,
-        ILogger<WatchdogService> logger)
-    {
-        _options = options.Value;
-        _logger = logger;
-    }
+    private readonly WatchdogOptions _options = options.Value;
+    private readonly RestartPolicy _restartPolicy = restartPolicy;
+    private readonly ProcessController _processController = processController;
+    private readonly ILogger<WatchdogService> _logger = logger;
+    private readonly Dictionary<string, DateTimeOffset> _cooldownStartUtc = [];
 
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Log resolved targets once on startup.
         foreach (var target in _options.Targets)
         {
             _logger.LogInformation(
@@ -48,58 +39,65 @@ public sealed class WatchdogService : BackgroundService
 
     private async Task CheckTargetAsync(WatchdogTarget target)
     {
-        var processName = target.Name;
-        var updateLockPath = target.GetUpdateLockPath();
-        var heartbeatPath = target.GetHeartbeatPath();
-        var updateSuppressed = IsUpdateSuppressed(updateLockPath, out var suppressionReason);
+        // Guard restart behavior based on lock/heartbeat files and backoff policy.
 
-        if (!updateSuppressed && !IsProcessRunning(processName))
+        // Check Process
+        var processName = target.GetProcessName();
+        var isProcessRunning = _processController.IsRunning(processName);
+
+        // Check Update
+        var updateLockPath = target.GetUpdateLockPath();
+        var updateLock = UpdateLockFileStore.Read(updateLockPath);
+        var isUpdateLocked = IsUpdateLocked(updateLock, updateLockPath);
+
+        // Check Heartbeat
+        var heartbeatPath = target.GetHeartbeatPath();
+        var heartbeat = HeartbeatFileStore.Read(heartbeatPath);
+        var isHeartbeatStale = IsHeartbeatStale(heartbeat);
+
+
+        // Restart logic
+        // 1. Update lock active -> no action
+        if (isUpdateLocked)
+        {
+            LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            return;
+        }
+
+        if (IsCooldownActive(processName))
+        {
+            LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            return;
+        }
+
+        // 2. Not running -> restart (crash)
+        if (!isProcessRunning)
         {
             await RestartProcessAsync(target, "crash", minDelaySec: 0).ConfigureAwait(false);
+            LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            return;
         }
 
-        var heartbeat = ReadHeartbeat(heartbeatPath);
-        if (heartbeat is not null)
+        // 3. Running but heartbeat problem -> restart (hang)
+        if (isHeartbeatStale)
         {
-            var timeout = TimeSpan.FromSeconds(_options.HeartbeatTimeoutSeconds);
-            if (!updateSuppressed && DateTimeOffset.UtcNow - heartbeat.TimestampUtc > timeout)
-            {
-                await RestartProcessAsync(target, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
-            }
+
+            await RestartProcessAsync(target, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
+            LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            return;
         }
 
-        var heartbeatAgeSec = heartbeat is null
-            ? (double?)null
-            : (DateTimeOffset.UtcNow - heartbeat.TimestampUtc).TotalSeconds;
-        _logger.LogInformation(
-            "Watchdog tick: target={Target} running={Running} heartbeatAgeSec={HeartbeatAgeSec} suppressed={Suppressed} reason={Reason}",
-            processName,
-            IsProcessRunning(processName),
-            heartbeatAgeSec,
-            updateSuppressed,
-            suppressionReason ?? "none");
-    }
-
-    private static bool IsProcessRunning(string processName)
-    {
-        try
-        {
-            return Process.GetProcessesByName(processName).Length > 0;
-        }
-        catch
-        {
-            return false;
-        }
+        StopCooldown(processName);
+        LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
     }
 
     private async Task RestartProcessAsync(WatchdogTarget target, string reason, int minDelaySec)
     {
-        var processName = target.Name;
+        var processName = target.GetProcessName();
         var now = DateTimeOffset.UtcNow;
         var window = TimeSpan.FromMinutes(_options.RestartWindowMinutes);
 
-        var limiter = GetLimiter(processName);
-        if (!limiter.TryRegisterRestart(now, window, _options.MaxRestartsInWindow))
+        if (!_restartPolicy.CanRestart(processName, now, window, _options.MaxRestartsInWindow))
         {
             _logger.LogWarning("Restart backoff active for {ProcessName}.", processName);
             await Task.Delay(TimeSpan.FromMinutes(_options.BackoffMinutes)).ConfigureAwait(false);
@@ -112,104 +110,87 @@ public sealed class WatchdogService : BackgroundService
         }
 
         _logger.LogWarning("Restarting {ProcessName} due to {Reason}.", processName, reason);
-        StartProcess(target);
+        _processController.Start(target);
+        StartCooldown(processName);
     }
 
-    private void StartProcess(WatchdogTarget target)
+    private static bool IsUpdateLocked(UpdateLockInfo? info, string lockPath)
     {
-        var exePath = target.GetExePath();
-        var workingDir = Path.GetDirectoryName(exePath) ?? AppContext.BaseDirectory;
-        var args = target.Arguments ?? string.Empty;
-
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(workingDir, "watchdog"));
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = exePath,
-                Arguments = args,
-                WorkingDirectory = workingDir,
-                UseShellExecute = true
-            });
-            _logger.LogInformation("Process started: {Name} ({Path})", target.Name, exePath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to start process {Name} at {Path}", target.Name, exePath);
-        }
-    }
-
-    private RestartLimiter GetLimiter(string name)
-    {
-        if (!_restartLimiters.TryGetValue(name, out var limiter))
-        {
-            limiter = new RestartLimiter();
-            _restartLimiters[name] = limiter;
-        }
-
-        return limiter;
-    }
-
-    private bool IsUpdateSuppressed(string updateLockPath, out string? reason)
-    {
-        reason = null;
-        if (!File.Exists(updateLockPath))
+        if (info is null)
         {
             return false;
         }
 
-        try
-        {
-            var payload = File.ReadAllText(updateLockPath);
-            var info = JsonSerializer.Deserialize<UpdateLockInfo>(payload, JsonOptions);
-            if (info is null)
-            {
-                return true;
-            }
-
-            reason = info.Reason;
-            if (info.ExpiresAtUtc == DateTimeOffset.MinValue)
-            {
-                return true;
-            }
-
-            if (DateTimeOffset.UtcNow <= info.ExpiresAtUtc)
-            {
-                return true;
-            }
-
-            File.Delete(updateLockPath);
-            return false;
-        }
-        catch
+        if (info.ExpiresAtUtc == DateTimeOffset.MinValue)
         {
             return true;
         }
+
+        if (DateTimeOffset.UtcNow <= info.ExpiresAtUtc)
+        {
+            return true;
+        }
+
+        UpdateLockFileStore.Delete(lockPath);
+        return false;
     }
 
-    private static HeartbeatInfo? ReadHeartbeat(string path)
+    private bool IsHeartbeatStale(HeartbeatInfo? heartbeat)
     {
-        if (!File.Exists(path))
+        if (heartbeat is null)
         {
-            return null;
+            return false;
         }
 
-        try
-        {
-            var payload = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<HeartbeatInfo>(payload, JsonOptions);
-        }
-        catch
-        {
-            return null;
-        }
+        var timeout = TimeSpan.FromSeconds(_options.HeartbeatTimeoutSeconds);
+        return DateTimeOffset.UtcNow - heartbeat.TimestampUtc > timeout;
     }
 
-    private sealed record HeartbeatInfo(DateTimeOffset TimestampUtc, int Pid, bool Responsive, int IdleSeconds);
-    private sealed record UpdateLockInfo(DateTimeOffset ExpiresAtUtc, string? Reason);
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private bool IsCooldownActive(string processName)
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+        if (!_cooldownStartUtc.TryGetValue(processName, out var lastStart))
+        {
+            return false;
+        }
+
+        var cooldown = TimeSpan.FromSeconds(_options.StartGraceSeconds);
+        return DateTimeOffset.UtcNow - lastStart < cooldown;
+    }
+
+    private void StartCooldown(string processName)
+    {
+        _cooldownStartUtc[processName] = DateTimeOffset.UtcNow;
+    }
+
+    private void StopCooldown(string processName)
+    {
+        _cooldownStartUtc.Remove(processName);
+    }
+
+    private void LogTargetStatus(
+        string processName,
+        bool isProcessRunning,
+        HeartbeatInfo? heartbeat,
+        bool isHeartbeatStale,
+        UpdateLockInfo? updateLock,
+        bool isUpdateLocked)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        _logger.LogInformation(
+            "Process={Process} Running={Running}" + Environment.NewLine +
+            "Heartbeat={HeartbeatState} (last={HeartbeatUtc:O}, now={NowUtc:O}, timeout={TimeoutSec}s)" + Environment.NewLine + 
+            "UpdateLock={LockActive} (from={LockStartUtc:O}, until={LockExpireUtc:O}, reason={Reason})",
+            processName,
+            isProcessRunning,
+            heartbeat == null ? "NONE" : isHeartbeatStale ? "STALE" : "OK",
+            heartbeat?.TimestampUtc,
+            nowUtc,
+            _options.HeartbeatTimeoutSeconds,
+            isUpdateLocked,
+            updateLock?.StartedAtUtc,
+            updateLock?.ExpiresAtUtc,
+            updateLock?.Reason ?? "none"
+        );
+
+    }
 }
