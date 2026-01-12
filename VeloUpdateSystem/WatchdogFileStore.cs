@@ -62,6 +62,20 @@ public sealed class WatchdogFileStore
         }
     }
 
+    public void ClearUpdateLock()
+    {
+        try
+        {
+            if (File.Exists(_updateLockPath))
+            {
+                File.Delete(_updateLockPath);
+            }
+        }
+        catch
+        {
+        }
+    }
+
     private static void WriteJsonAtomic<T>(string path, T payload)
     {
         var tempPath = path + ".tmp";

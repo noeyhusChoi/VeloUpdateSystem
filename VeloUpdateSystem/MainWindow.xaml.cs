@@ -261,7 +261,24 @@ namespace VeloUpdateSystem
                 Debug.WriteLine($"Update lock write failed: {ex}");
             }
 
-            _updateManager.ApplyUpdatesAndRestart(_pendingUpdate, Array.Empty<string>());
+            try
+            {
+                _heartbeatTimer.Stop();
+                _applyTimer.Stop();
+                _updateLoopCts.Cancel();
+
+                _updateManager.ApplyUpdatesAndRestart(_pendingUpdate, Array.Empty<string>());
+                Application.Current.Dispatcher.Invoke(Application.Current.Shutdown);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Update apply failed: {ex}");
+                SetUpdateStatus("Update: apply failed");
+                _watchdogStore.ClearUpdateLock();
+                _updateInProgress = false;
+                _heartbeatTimer.Start();
+                _applyTimer.Start();
+            }
         }
 
         private bool IsIdleFor(TimeSpan duration)
