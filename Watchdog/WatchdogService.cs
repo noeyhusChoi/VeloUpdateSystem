@@ -73,8 +73,8 @@ public sealed class WatchdogService(
         // 2. Not running -> restart (crash)
         if (!isProcessRunning)
         {
-            await RestartProcessAsync(target, "crash", minDelaySec: 0).ConfigureAwait(false);
             LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            await RestartProcessAsync(target, "crash", minDelaySec: 0).ConfigureAwait(false);
             return;
         }
 
@@ -82,8 +82,8 @@ public sealed class WatchdogService(
         if (isHeartbeatStale)
         {
 
-            await RestartProcessAsync(target, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
             LogTargetStatus(processName, isProcessRunning, heartbeat, isHeartbeatStale, updateLock, isUpdateLocked);
+            await RestartProcessAsync(target, "heartbeatTimeout", minDelaySec: 0).ConfigureAwait(false);
             return;
         }
 
@@ -183,12 +183,12 @@ public sealed class WatchdogService(
             processName,
             isProcessRunning,
             heartbeat == null ? "NONE" : isHeartbeatStale ? "STALE" : "OK",
-            heartbeat?.TimestampUtc,
-            nowUtc,
+            heartbeat?.TimestampUtc.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+            nowUtc.ToString("yyyy-MM-dd HH:mm:ss.fff"),
             _options.HeartbeatTimeoutSeconds,
             isUpdateLocked,
-            updateLock?.StartedAtUtc,
-            updateLock?.ExpiresAtUtc,
+            updateLock?.StartedAtUtc.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+            updateLock?.ExpiresAtUtc.ToString("yyyy-MM-dd HH:mm:ss.fff"),
             updateLock?.Reason ?? "none"
         );
 

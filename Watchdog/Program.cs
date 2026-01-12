@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 using Serilog.Events;
+using Velopack;
 
 namespace Watchdog;
 
@@ -34,13 +35,23 @@ public static class Program
 
         try
         {
+            using var instanceLock = new Mutex(true, "Global\\VeloUpdateSystem.Watchdog", out var isFirstInstance);
+            if (!isFirstInstance)
+            {
+                Log.Information("Watchdog is already running. Exiting.");
+                return;
+            }
+
+            VelopackApp.Build()
+                .SetArgs(args)
+                .Run();
+
             Host.CreateDefaultBuilder(args)
                 .UseWindowsService()
                 .UseSerilog()
                 .ConfigureServices((context, services) =>
                 {
-                    services.Configure<WatchdogOptions>(
-                        context.Configuration.GetSection(WatchdogOptions.SectionName));
+                    services.Configure<WatchdogOptions>(context.Configuration.GetSection(WatchdogOptions.SectionName));
                     services.AddSingleton<RestartPolicy>();
                     services.AddSingleton<ProcessController>();
                     services.AddHostedService<WatchdogService>();

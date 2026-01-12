@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "app-v*"
+      - "watchdog-v*"
 
 permissions:
   contents: read
@@ -86,22 +87,6 @@ jobs:
           -r win-x64 `
           --self-contained false `
           -o publish_app
-
-    - name: Publish Watchdog
-      shell: pwsh
-      run: |
-        dotnet publish Watchdog/Watchdog.csproj `
-          -c Release `
-          -r win-x64 `
-          --self-contained false `
-          -o publish_watchdog
-
-    - name: Bundle Watchdog into app package
-      shell: pwsh
-      run: |
-        $target = Join-Path "publish_app" "Watchdog"
-        New-Item -ItemType Directory -Force -Path $target | Out-Null
-        Copy-Item -Path "publish_watchdog\\*" -Destination $target -Recurse -Force
 
 
     # --------------------------------------------------------
@@ -240,6 +225,234 @@ jobs:
         CHANNEL="${{ needs.build-app.outputs.channel }}"
         VERSION="${{ needs.build-app.outputs.version }}"
         BASE="/var/www/velopack/releases/app/${CHANNEL}"
+
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "
+          set -e
+          ln -sfn ${BASE}/${VERSION} ${BASE}/current
+          if [ \"${CHANNEL}\" = \"stable\" ]; then
+            ln -sfn ${BASE}/current/releases.stable.json ${BASE}/current/releases.json
+            ln -sfn ${BASE}/current/assets.stable.json ${BASE}/current/assets.json
+          fi
+          "
+
+# ============================================================
+# Job 3: Build & Pack Watchdog (Windows)
+# ============================================================
+  build-watchdog:
+    runs-on: windows-latest
+    if: startsWith(github.ref_name, 'watchdog-v')
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      product: watchdog
+
+    steps:
+    # --------------------------------------------------------
+    # 1. Checkout
+    # --------------------------------------------------------
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    # --------------------------------------------------------
+    # 2. Extract version & channel
+    # --------------------------------------------------------
+    - name: Extract version from tag
+      id: version
+      shell: pwsh
+      run: |
+        $tag = "${{ github.ref_name }}"
+
+        if ($tag -notmatch '^watchdog-v\d+\.\d+\.\d+(-beta\.\d+)?$') {
+          Write-Error "Invalid tag format: $tag"
+          exit 1
+        }
+
+        $version = $tag.Substring(10)
+        $channel = if ($version -match 'beta') { "beta" } else { "stable" }
+
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "channel=$channel" >> $env:GITHUB_OUTPUT
+
+    # --------------------------------------------------------
+    # 3. Setup .NET SDK
+    # --------------------------------------------------------
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    # --------------------------------------------------------
+    # 3a. Cache dotnet tools and NuGet packages
+    # --------------------------------------------------------
+    - name: Cache dotnet tools
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\.dotnet\tools
+        key: dotnet-tools-${{ runner.os }}-v1
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\.nuget\packages
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', '**/packages.lock.json') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
+
+    # --------------------------------------------------------
+    # 4. Publish Watchdog
+    # --------------------------------------------------------
+    - name: Publish Watchdog
+      shell: pwsh
+      run: |
+        dotnet publish Watchdog/Watchdog.csproj `
+          -c Release `
+          -r win-x64 `
+          --self-contained false `
+          -o publish_watchdog
+
+    # --------------------------------------------------------
+    # 5. Install Velopack CLI
+    # --------------------------------------------------------
+    - name: Install Velopack
+      shell: pwsh
+      run: dotnet tool install -g vpk
+
+    # --------------------------------------------------------
+    # 6. Velopack pack (Windows only)
+    # --------------------------------------------------------
+    - name: Seed previous releases for delta
+      shell: pwsh
+      run: |
+        $channel = "${{ steps.version.outputs.channel }}"
+        $seedUrl = "http://4.218.15.147/releases/watchdog/$channel/current/"
+        $target = "artifacts_watchdog"
+
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+
+        $releasesFile = if ($channel -eq "beta") { "releases.beta.json" } else { "releases.json" }
+        $releasesUrl = $seedUrl + $releasesFile
+        $releasesPath = Join-Path $target $releasesFile
+
+        try {
+          Invoke-WebRequest -Uri $releasesUrl -OutFile $releasesPath -UseBasicParsing
+        } catch {
+          Write-Host "No seed releases found at $releasesUrl"
+          exit 0
+        }
+
+        $json = Get-Content -Path $releasesPath -Raw | ConvertFrom-Json
+        $assets = @()
+        if ($json.Assets) {
+          $assets = $json.Assets | Where-Object { $_.FileName -match '\.nupkg$' }
+        }
+
+        foreach ($asset in $assets) {
+          $pkg = $asset.FileName
+          $pkgUrl = $seedUrl + $pkg
+          $pkgPath = Join-Path $target $pkg
+          Write-Host "Seeding $pkgUrl"
+          Invoke-WebRequest -Uri $pkgUrl -OutFile $pkgPath -UseBasicParsing
+        }
+
+        Write-Host "Seed contents:"
+        Get-ChildItem $target | Format-Table -AutoSize
+        Write-Host "Seed releases.json:"
+        Get-Content -Path $releasesPath
+
+    - name: Velopack pack
+      shell: pwsh
+      run: |
+        vpk pack `
+          --packId VeloUpdateSystem.Watchdog `
+          --packVersion ${{ steps.version.outputs.version }} `
+          --packDir publish_watchdog `
+          --outputDir artifacts_watchdog `
+          --channel ${{ steps.version.outputs.channel }} `
+          --mainExe Watchdog.exe `
+          --msiDeploymentTool
+
+    # --------------------------------------------------------
+    # 7. Upload artifacts
+    # --------------------------------------------------------
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: watchdog-artifacts
+        path: artifacts_watchdog/
+
+# ============================================================
+# Job 4: Deploy Watchdog (Linux)
+# ============================================================
+  deploy-watchdog:
+    runs-on: ubuntu-latest
+    needs: build-watchdog
+
+    steps:
+    # --------------------------------------------------------
+    # 1. Download artifacts
+    # --------------------------------------------------------
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: watchdog-artifacts
+        path: artifacts
+
+    # --------------------------------------------------------
+    # 2. Setup SSH
+    # --------------------------------------------------------
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.AZURE_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+
+    # --------------------------------------------------------
+    # 3. Test SSH connection
+    # --------------------------------------------------------
+    - name: Test SSH connection
+      run: |
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "echo SSH connection OK"
+
+    # --------------------------------------------------------
+    # 4. Upload to server (versioned)
+    # --------------------------------------------------------
+    - name: Upload to Azure (versioned)
+      run: |
+        CHANNEL="${{ needs.build-watchdog.outputs.channel }}"
+        VERSION="${{ needs.build-watchdog.outputs.version }}"
+        BASE="/var/www/velopack/releases/watchdog/${CHANNEL}"
+        VERSION_DIR="${BASE}/${VERSION}"
+
+        ssh \
+          -o StrictHostKeyChecking=no \
+          -o KexAlgorithms=curve25519-sha256 \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }} \
+          "mkdir -p ${VERSION_DIR}"
+
+        rsync -av \
+          -e "ssh -o StrictHostKeyChecking=no -o KexAlgorithms=curve25519-sha256" \
+          artifacts/ \
+          ${{ vars.AZURE_SSH_USER }}@${{ vars.AZURE_SSH_HOST }}:${VERSION_DIR}/
+
+    # --------------------------------------------------------
+    # 5. Update live pointer
+    # --------------------------------------------------------
+    - name: Update live pointer
+      run: |
+        CHANNEL="${{ needs.build-watchdog.outputs.channel }}"
+        VERSION="${{ needs.build-watchdog.outputs.version }}"
+        BASE="/var/www/velopack/releases/watchdog/${CHANNEL}"
 
         ssh \
           -o StrictHostKeyChecking=no \
